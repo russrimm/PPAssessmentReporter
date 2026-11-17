@@ -1,0 +1,3 @@
+# Review output contains tenant data (users, environments, agents). Never commit it.
+PPCS-Review-*/
+*.har

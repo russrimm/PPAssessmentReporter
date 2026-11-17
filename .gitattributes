@@ -1,0 +1,4 @@
+# Keep the script byte-for-byte (UTF-8 BOM and CRLF are intentional for Windows PowerShell 5.1).
+*.ps1 -text
+*.docx binary
+*.pptx binary
