@@ -2740,6 +2740,8 @@ table.matrix td.h1{background:var(--fail-bg);color:var(--fail);font-weight:700}t
 .fixlist .n{width:30px;height:30px;border-radius:50%;background:var(--brand);color:#fff;display:grid;place-items:center;font-weight:700;font-size:13px}
 .fixlist .t{font-weight:650}.fixlist .v{color:var(--muted);font-size:13px;margin-top:2px}.fixlist .a{margin-top:4px;font-size:13px}
 .fixlist .a:before{content:"Do: ";font-weight:650;color:var(--brand2)}
+.fixlist .w{margin-top:2px;font-size:13px;color:var(--muted)}.fixlist .w:before{content:"Why: ";font-weight:650;color:var(--brand2)}
+.why{margin-top:-4px;font-size:12.5px;color:var(--muted)}.why b{color:var(--brand2)}
 .chip{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:650;line-height:1.5;white-space:nowrap}
 .s-Fail{background:var(--fail-bg);color:var(--fail)}.s-Warning{background:var(--warn-bg);color:var(--warn)}.s-Pass{background:var(--pass-bg);color:var(--pass)}
 .s-Info{background:var(--info-bg);color:var(--info)}.s-Unavailable{background:var(--na-bg);color:var(--na)}.s-Manual{background:var(--man-bg);color:var(--man)}
@@ -2995,6 +2997,106 @@ function Format-HtmlTable {
     return $sb.ToString()
 }
 
+# ------------------------------------------------------------------ Why it is recommended
+# One plain sentence per control. First matching rule wins; Title is an optional extra filter.
+$WhyRules = @(
+    @{ Id = '^1\.3$'; Why = 'Environment group rules apply governance consistently to every environment in the group instead of one at a time.' }
+    @{ Id = '^1\.[67]$'; Why = 'You cannot govern what you cannot see, so a current inventory of apps, flows and agents is the baseline for every other control.' }
+    @{ Id = '^2\.1$'; Why = 'Standing admin accounts are the highest-value targets in the tenant, so fewer of them means less damage if one is compromised.' }
+    @{ Id = '^2\.2$'; Why = 'Just-in-time activation through PIM limits how long admin rights exist and adds approval, MFA and an audit trail.' }
+    @{ Id = '^2\.3$'; Why = 'Tenant settings decide who can create environments, share broadly and share data with Microsoft, so they set the baseline for everything else.' }
+    @{ Id = '^2\.4$'; Why = 'Uncontrolled environment creation produces sprawl outside data policies, ownership and monitoring.' }
+    @{ Id = '^2\.5$'; Why = 'Without tenant isolation, connectors can move data to and from other tenants outside your control.' }
+    @{ Id = '^2\.6$'; Why = 'Advisor already detected these exposures (broad sharing, idle assets, heavily used apps in the default environment), so they are cheap to confirm and fix.' }
+    @{ Id = '^3\.1$'; Why = 'Every licensed user can build in the default environment, so unless it is hardened it becomes where shadow apps and data pile up.' }
+    @{ Id = '^3\.2$'; Why = 'Knowing every environment, its type and its owner is the starting point for applying the right controls to each one.' }
+    @{ Id = '^3\.3$'; Why = 'Build roles in production let people change live apps outside change control; makers should build in development and deploy through pipelines.' }
+    @{ Id = '^3\.4$'; Why = 'Managed Environments adds sharing limits, usage insights and solution checks. It is a recommendation, and each customer decides how far to roll it out.' }
+    @{ Id = '^3\.5$'; Why = 'Microsoft documents a deprecation for unmanaged developer environments, so ones you want to keep need a plan before the deadline.' }
+    @{ Id = '^3\.6$'; Why = 'Environment routing sends new makers to their own governed developer environments instead of the shared default environment.' }
+    @{ Id = '^3\.7$'; Why = 'Grouping environments lets you apply rules in bulk and keep production separate from experimentation.' }
+    @{ Id = '^3\.8$'; Why = 'A security group limits who can enter a Dataverse environment, so access is intentional rather than tenant-wide.' }
+    @{ Id = '^3\.9$'; Why = 'Empty, trial or unhealthy environments use capacity and widen the attack surface without delivering value.' }
+    @{ Id = '^4\.2$'; Why = 'Consumer and external-service connectors in the Business group let business data flow to personal or untrusted services.' }
+    @{ Id = '^4\.3$'; Why = 'The default group decides how every new connector is treated, and Blocked or Non-business is the safer default.' }
+    @{ Id = '^4\.6$'; Title = 'HTTP'; Why = 'The HTTP connector can send data to any endpoint, so block it or limit it to approved endpoints.' }
+    @{ Id = '^4\.6$'; Why = 'Custom and third-party connectors reach outside Microsoft services and need review for authentication and ownership.' }
+    @{ Id = '^4\.7$'; Why = 'The unauthenticated chat connector lets agents answer anyone who finds them, and blocking it enforces sign-in tenant-wide.' }
+    @{ Id = '^4\.8$'; Why = 'Classifying the connectors that agents use controls where agent data and triggers can flow.' }
+    @{ Id = '^4\.12$'; Why = 'Desktop flows can touch local apps and data, so data policies should cover them too.' }
+    @{ Id = '^4\.'; Why = 'Data policies stop business data from flowing to consumer or untrusted services, and a tenant baseline covers new environments automatically.' }
+    @{ Id = '^5\.1$'; Why = 'MFA and Conditional Access protect makers, admins and agent users from stolen or phished credentials.' }
+    @{ Id = '^5\.3$'; Why = 'Authentication rules make sure every agent in the group requires users to sign in.' }
+    @{ Id = '^5\.4$'; Why = 'Application users with System Administrator hold powerful non-interactive access that is easy to forget and hard to audit.' }
+    @{ Id = '^5\.7$'; Why = 'Guest users can reach business data, so each one should be intentional and reviewed.' }
+    @{ Id = '^5\.8$'; Why = 'Assets owned by deleted or disabled people have no one accountable and often keep running with stale connections.' }
+    @{ Id = '^6\.1$'; Why = 'Many System Administrators means many people who can read all data and change security, so least privilege reduces risk.' }
+    @{ Id = '^6\.4$'; Why = 'Auditing is the evidence trail for who accessed or changed data, and it has to be on before an incident happens.' }
+    @{ Id = '^6\.5$'; Why = 'Conversation transcripts can hold personal data, so retention and access should be limited to what the business needs.' }
+    @{ Id = '^6\.7$'; Why = 'Virtual network injection keeps Dataverse and connector traffic on your private network.' }
+    @{ Id = '^6\.8$'; Why = 'Customer-managed keys give you control over the encryption keys protecting regulated data.' }
+    @{ Id = '^6\.9$'; Why = 'Longer backup retention gives you more recovery options after accidental deletion or corruption of production data.' }
+    @{ Id = '^7\.[12]$'; Why = 'Sharing with Everyone exposes apps and connections to the whole organization, including guests where allowed.' }
+    @{ Id = '^7\.4$'; Why = 'Unowned or long-unchanged apps keep live connections and access without anyone maintaining them.' }
+    @{ Id = '^7\.5$'; Why = 'Code apps run custom code outside the low-code guardrails, so they need review and an allow-list.' }
+    @{ Id = '^7\.6$'; Why = 'Solution checker finds security and quality issues before solutions reach production.' }
+    @{ Id = '^7\.9$'; Why = 'Anonymous Power Pages sites are exposed to the internet, so site visibility and table permissions must be deliberate.' }
+    @{ Id = '^8\.1$'; Title = 'Orphaned'; Why = 'Flows owned by deleted or disabled accounts can fail or keep running with no one accountable.' }
+    @{ Id = '^8\.1$'; Title = 'rule'; Why = 'Flow rules in the environment group apply the same automation limits to every environment in it.' }
+    @{ Id = '^8\.1$'; Why = 'Business-critical flows in the default environment lack ownership, isolation and lifecycle control.' }
+    @{ Id = '^8\.2$'; Why = 'A flow started by an HTTP request can be called by anyone who has the URL, so access and input need to be restricted.' }
+    @{ Id = '^8\.3$'; Why = 'Secrets stored in flow definitions can be read by anyone with access to the flow and are hard to rotate.' }
+    @{ Id = '^8\.6$'; Why = 'Flows and apps that send data to external services can move business data outside approved boundaries.' }
+    @{ Id = '^8\.8$'; Why = 'A suspended flow usually means repeated failures, so the process it automates is silently not running.' }
+    @{ Id = '^9\.1$'; Why = 'Agents without authentication answer anyone, so they must not be able to reach internal knowledge or actions.' }
+    @{ Id = '^9\.[23]$'; Why = 'Open and website channels expose agents to the internet, where an unauthenticated agent can leak data or be abused.' }
+    @{ Id = '^9\.4$'; Why = 'Sharing an agent tenant-wide puts it in front of every user, guests included.' }
+    @{ Id = '^9\.6$'; Why = 'Environment group rules for Copilot settings enforce one standard for agent behavior.' }
+    @{ Id = '^9\.7$'; Title = 'secret'; Why = 'Secrets written into agent topics can be read by anyone who can edit or export the agent and are hard to rotate.' }
+    @{ Id = '^9\.7$'; Why = 'HTTP requests from topics send data to external endpoints that data policies may not govern.' }
+    @{ Id = '^9\.9$'; Why = 'Drafts, stale publishes and orphaned agents are unmanaged risk, so retire or reassign them.' }
+    @{ Id = '^10\.4$'; Why = 'SharePoint knowledge without user authentication can expose internal content to anonymous users.' }
+    @{ Id = '^10\.5$'; Why = 'Public websites and web search let agents answer from content nobody on your side has vetted.' }
+    @{ Id = '^10\.8$'; Why = 'Allowing general model knowledge can produce answers that are not grounded in your approved content.' }
+    @{ Id = '^10\.'; Why = 'Knowledge sources decide what an agent can reveal, so each one should be approved and access-controlled.' }
+    @{ Id = '^11\.2$'; Title = 'Computer use'; Why = 'Computer use with stored credentials or shared machines can act with broad rights on desktops.' }
+    @{ Id = '^11\.2$'; Why = 'A tool that runs as the maker gives every user of the agent the maker''s access, which breaks least privilege.' }
+    @{ Id = '^11\.3$'; Why = 'Write-like actions that run as the maker or without user consent can change data without the user approving it.' }
+    @{ Id = '^11\.4$'; Why = 'Autonomous agents act without a person present, so they need a reviewed identity, limits and monitoring.' }
+    @{ Id = '^11\.5$'; Why = 'MCP servers and external agents extend an agent''s reach into systems you may not control.' }
+    @{ Id = '^11\.8$'; Why = 'Connected agents and skills pass data between agents, so each hop needs to be trusted.' }
+    @{ Id = '^11\.'; Why = 'Tools let an agent take actions, so credential mode, scope and approval decide how much damage a bad prompt can do.' }
+    @{ Id = '^12\.'; Why = 'Weaker content moderation raises the chance of harmful or off-topic responses.' }
+    @{ Id = '^13\.'; Why = 'Managed solutions deployed through pipelines give repeatable, reviewable releases instead of untracked changes in production.' }
+    @{ Id = '^14\.1$'; Why = 'Conversation audit logging records what agents said and did, which investigations and compliance reviews depend on.' }
+    @{ Id = '^14\.3$'; Why = 'The weekly admin digest keeps new risks in front of admins without anyone having to go looking.' }
+    @{ Id = '^14\.8$'; Why = 'Tracking these indicators over time shows whether governance is improving.' }
+    @{ Id = '^15\.3$'; Why = 'Running out of Dataverse capacity blocks new data and can stop apps from working.' }
+    @{ Id = '^15\.'; Why = 'Credit boundaries stop one agent or environment from draining the shared pool or causing unexpected cost.' }
+    @{ Id = '^16\.1$'; Title = 'sharing'; Why = 'Sharing data with Microsoft for AI features is optional and should be a deliberate decision.' }
+    @{ Id = '^16\.1$'; Title = 'CrossGeo'; Why = 'Cross-geography data movement for AI features can conflict with data-residency requirements.' }
+    @{ Id = '^16\.1$'; Why = 'Where data is stored and processed affects privacy and data-residency obligations.' }
+    @{ Id = '^16\.6$'; Why = 'Agents that use consumer or external connectors can send business data outside the organization.' }
+    @{ Id = '^17\.6$'; Why = 'Deprecated connectors lose support, which eventually breaks the apps and flows that depend on them.' }
+    @{ Id = '^17\.7$'; Title = 'rule'; Why = 'Lifecycle rules keep environments and assets from lingering after they stop being used.' }
+    @{ Id = '^17\.7$'; Why = 'Quarantine lets you isolate a risky app, flow or agent quickly while you investigate.' }
+    @{ Id = '^18\.[67]$'; Why = 'Credit consumption shows which agents cost money and which are idle but still exposed.' }
+    @{ Id = '^18\.'; Why = 'Usage shows where risk and value meet: heavily used assets deserve stronger controls, and unused ones are risk with no benefit.' }
+)
+
+function Get-WhyText {
+    param($F)
+    foreach ($r in $WhyRules) {
+        if ([string]$F.Id -notmatch $r.Id) { continue }
+        if ($r.ContainsKey('Title') -and [string]$F.Title -notmatch $r.Title) { continue }
+        return [string]$r.Why
+    }
+    $cl = $script:Checklist[[string]$F.Id]
+    if ($cl -and $cl.PSObject.Properties['Why'] -and $cl.Why) { return [string]$cl.Why }
+    if ($TopicWhy.ContainsKey([int]$F.Topic)) { return (Get-FirstSentence ([string]$TopicWhy[[int]$F.Topic]) 220) }
+    return ''
+}
+
 # ------------------------------------------------------------------ Microsoft Learn references
 # Every URL below was checked and returned HTTP 200 on learn.microsoft.com when this list was written.
 $LearnRoot = 'https://learn.microsoft.com/en-us/'
@@ -3206,7 +3308,11 @@ function Format-FindingCard {
     if (-not $found) { $found = "<p class='small'>No further detail.</p>" }
     $one = if ($hasRec) { '' } else { ' one' }
     [void]$sb.Append("<div class='f-body$one'><div><div class='lbl'>What we found</div>$found</div>")
-    if ($hasRec) { [void]$sb.Append("<div><div class='lbl'>Recommended action</div><p>$(Format-Html $F.Recommendation)</p></div>") }
+    if ($hasRec) {
+        $whyCard = Get-WhyText $F
+        $whyHtml = if ($whyCard) { "<p class='why'><b>Why:</b> $(Format-Html $whyCard)</p>" } else { '' }
+        [void]$sb.Append("<div><div class='lbl'>Recommended action</div><p>$(Format-Html $F.Recommendation)</p>$whyHtml</div>")
+    }
     [void]$sb.Append('</div>')
     if ($F.EvidenceCount -gt 0) {
         $cols = @($F.Evidence[0].PSObject.Properties.Name)
@@ -3253,7 +3359,7 @@ function Write-Report {
 
     # ---- machine-readable exports (existing columns first, new columns appended)
     $props = @('Key', 'Id', 'Topic', 'TopicName', 'Title', 'Status', 'Severity', 'Value', 'Detail', 'Recommendation', 'Source', 'EvidenceCount', 'EvidenceFile') +
-    @(@{ Name = 'Confidence'; Expression = { $_.Confidence } }, @{ Name = 'AlsoCovers'; Expression = { @($_.AlsoCovers) -join '; ' } }, @{ Name = 'RollupKey'; Expression = { $_.RollupKey } }, @{ Name = 'LearnLinks'; Expression = { (@(Get-LearnLinks $_) | ForEach-Object { $_.Url }) -join '; ' } })
+    @(@{ Name = 'Confidence'; Expression = { $_.Confidence } }, @{ Name = 'AlsoCovers'; Expression = { @($_.AlsoCovers) -join '; ' } }, @{ Name = 'RollupKey'; Expression = { $_.RollupKey } }, @{ Name = 'LearnLinks'; Expression = { (@(Get-LearnLinks $_) | ForEach-Object { $_.Url }) -join '; ' } }, @{ Name = 'Why'; Expression = { Get-WhyText $_ } })
     $flat = @($script:Findings | Select-Object -Property $props)
     Export-SafeCsv -Rows $flat -Path (Join-Path $Dir 'findings.csv')
     ConvertTo-Json -InputObject $flat -Depth 4 | Out-File -FilePath (Join-Path $Dir 'findings.json') -Encoding UTF8
@@ -3454,6 +3560,8 @@ function Get-HtmlSummary {
         $val = Get-ShortText $(if ($f.Value) { $f.Value } else { $f.Detail }) 190
         $act = Get-FirstSentence $f.Recommendation 220
         $actHtml = if ($act) { "<div class='a'>$(Format-Html $act)</div>" } else { '' }
+        $whyTxt = Get-WhyText $f
+        if ($act -and $whyTxt) { $actHtml += "<div class='w'>$(Format-Html $whyTxt)</div>" }
         $fix += "<li><span class='n'>$rank</span><div><div class='t'>$(Format-StatusChip $f.Status) $(Format-SeverityChip $f.Severity) <a href='#f-$($f.Key)'>$(Format-Html $f.Title)</a> <span class='fid'>$(Format-Html $f.Id)</span>$related</div><div class='v'>$(Format-Html $val)</div>$actHtml</div></li>"
     }
     $fixHtml = if ($fix) { "<ol class='fixlist'>$fix</ol><p class='small' style='margin-top:10px'>$(@($M.Actions).Count) item(s) need action or verification. The roadmap below groups all of them.</p>" } else { '<p>No open gaps were found by the automated checks.</p>' }
