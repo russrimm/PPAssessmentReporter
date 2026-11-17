@@ -866,12 +866,13 @@ function Test-Environments {
     $script:Kpi['Managed environments %'] = $pct
     $unmanagedProd = @($eligible | Where-Object { -not $_.IsManaged -and $_.Type -in @('Production', 'Default') })
     $unmanagedOther = @($eligible | Where-Object { -not $_.IsManaged -and $_.Type -notin @('Production', 'Default') })
-    $st = if ($unmanagedProd.Count -gt 0) { 'Fail' } elseif ($unmanagedOther.Count -gt 0) { 'Warning' } else { 'Pass' }
+    # Managed Environments is a recommendation: each customer decides how far to roll it out, so coverage is informational and not scored.
+    $st = 'Info'
     $ev = @(($unmanagedProd + $unmanagedOther) | ForEach-Object { [pscustomobject]@{ Environment = $_.Name; Type = $_.Type; Id = $_.Id } })
     $teamsNote = if ($teamsEnvs.Count -gt 0) { "; $($teamsEnvs.Count) Dataverse for Teams environment(s) not counted (deprecated)" } else { '' }
-    Add-Finding -Id '3.4' -Title 'Managed Environments coverage' -Status $st -Severity 'Critical' -Source $src -Evidence $ev `
+    Add-Finding -Id '3.4' -Title 'Managed Environments coverage' -Status $st -Severity 'Low' -Source $src -Evidence $ev `
         -Value "$($managed.Count) of $($eligible.Count) managed ($pct%); unmanaged production/default: $($unmanagedProd.Count); unmanaged other: $($unmanagedOther.Count)$teamsNote" `
-        -Recommendation $(if ($st -ne 'Pass') { 'Convert production, default and developer environments to Managed Environments (PPAC > Security > Overview > Turn on environment management).' } else { '' })
+        -Recommendation $(if ($unmanagedProd.Count + $unmanagedOther.Count -gt 0) { 'Recommended: consider Managed Environments for production, default and other environments that hold business-critical assets. How far to roll it out is each customer''s decision (PPAC > Security > Overview > Turn on environment management).' } else { '' })
 
     # 3.5 developer environment deprecation
     $devUnmanaged = @($envs | Where-Object { $_.Type -eq 'Developer' -and -not $_.IsManaged })
@@ -2481,10 +2482,10 @@ function Get-EnvironmentProfile {
         if ($e.Type -eq 'Teams') { AddFlag 3 'Dataverse for Teams (deprecated)' }
         elseif (-not $e.IsManaged) {
             switch ($e.Type) {
-                'Default' { AddFlag 25 'Default environment is not managed' }
-                'Production' { AddFlag 25 'Production environment is not managed' }
+                'Default' { AddFlag 10 'Default environment is not managed (recommended)' }
+                'Production' { AddFlag 10 'Production environment is not managed (recommended)' }
                 'Developer' { AddFlag 10 'Unmanaged developer environment (deprecation)' }
-                'Sandbox' { AddFlag 8 'Sandbox is not managed' }
+                'Sandbox' { AddFlag 4 'Sandbox is not managed (recommended)' }
                 default { AddFlag 3 "Unmanaged $($e.Type) environment" }
             }
         }
@@ -2631,7 +2632,6 @@ function Get-BaselineDiff {
 function Get-KpiClass {
     param([string]$Name, $Value)
     $rules = @{
-        'Managed environments %' = @{ Dir = 'high'; Good = 90; Warn = 60 }
         'Environments in a group %' = @{ Dir = 'high'; Good = 80; Warn = 40 }
         'Highest Dataverse capacity use %' = @{ Dir = 'low'; Good = 70; Warn = 85 }
         'Unauthenticated agents' = @{ Dir = 'zero' }
