@@ -4,6 +4,10 @@ All notable changes to `Invoke-PPCSReview.ps1`. Dates are release dates.
 
 ## Unreleased
 
+### Added
+
+- **Related tools links** to the independent [Agent Governance Navigator](https://akadrno.github.io/agent-governance-navigator-site/) by akadrno, in the report's About dialog and footer, the roadmap, the agent risk register and the appendix, plus a Related tools section in the README. Link only: the repository has no published license, so nothing is copied, and the report never contacts the site.
+
 ### Changed
 
 - Roadmap status pills are now aligned in a fixed-width column on the right of each item, so they line up in every column of the 30/60/90-day roadmap.
