@@ -2,6 +2,12 @@
 
 All notable changes to `Invoke-PPCSReview.ps1`. Dates are release dates.
 
+## Unreleased
+
+### Changed
+
+- Roadmap status pills are now aligned in a fixed-width column on the right of each item, so they line up in every column of the 30/60/90-day roadmap.
+
 ## 2.1.0 - 2026-11-17
 
 ### Added
