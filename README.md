@@ -12,13 +12,37 @@ The screenshots below come from the redacted sample report. [Open the full sampl
 
 ![Executive summary with maturity score, findings by status and open items by severity](docs/sample-report/report-summary.png)
 
+**Start here:** the 16 highest-value checks, each with its result, what was found and the checklist items behind it.
+
+![Start here table of the highest-value checks](docs/sample-report/report-start-here.png)
+
+**30/60/90-day roadmap:** open items grouped into Contain, Standardize, Automate and measure, and Optimize.
+
+![30/60/90-day roadmap](docs/sample-report/report-roadmap.png)
+
 **Scorecard:** each of the 18 governance areas scored and placed in a maturity band.
 
 ![Scorecard by assessment area](docs/sample-report/report-scorecard.png)
 
+**Usage and adoption:** the busiest and unused apps, flows and agents, so the strongest controls go where they matter most.
+
+![Usage and adoption: highest used and not used](docs/sample-report/report-usage.png)
+
+**Agent risk register:** every Copilot Studio agent scored from its authentication, channels, sharing, credentials and knowledge signals.
+
+![Agent risk register](docs/sample-report/report-agents.png)
+
+**Environment profile:** every environment on one line with its management, assets, rating and risk flags.
+
+![Environment profile](docs/sample-report/report-environments.png)
+
 **All findings:** filterable by status, severity and area, with evidence behind every result.
 
 ![All findings with status, severity and area filters](docs/sample-report/report-findings.png)
+
+**A single finding:** what we found, the recommended action, why it matters, and Microsoft Learn references.
+
+![Expanded findings showing evidence, recommended action, why and Microsoft Learn links](docs/sample-report/report-finding-detail.png)
 
 ## Contents
 
