@@ -3346,6 +3346,8 @@ footer.page{color:var(--muted);font-size:12px;text-align:center;padding:10px 0 3
 .about-name{font-size:18px;font-weight:700;color:var(--ink)}
 .about-role{color:var(--muted);font-size:13px;margin-bottom:6px}
 .about-links{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px}
+.related{background:var(--soft);border-left:4px solid var(--brand2);border-radius:8px;padding:11px 14px;font-size:12.5px;line-height:1.5;color:var(--ink);text-align:left}.related a{color:var(--brand2);font-weight:600;text-decoration:none}.related a:hover{text-decoration:underline}
+.panel p.small a{color:var(--brand2);font-weight:600;text-decoration:none}.panel p.small a:hover{text-decoration:underline}
 .alink{display:inline-flex;align-items:center;gap:6px;color:var(--brand2);text-decoration:none;font-weight:600}.alink:hover{text-decoration:underline}
 .disclaimer{background:var(--soft);border-left:4px solid var(--brand2);border-radius:8px;padding:11px 14px;font-size:12.5px;line-height:1.5;color:var(--ink);text-align:left}
 .aboutcard{max-width:760px;margin:6px auto 16px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;text-align:left;box-shadow:var(--shadow)}
@@ -4018,6 +4020,18 @@ function Get-HtmlHero {
 "@
 }
 
+$script:NavigatorUrl = 'https://akadrno.github.io/agent-governance-navigator-site/'
+
+# Link only: the report never fetches from the navigator, so it stays offline-safe.
+function Get-NavigatorLink {
+    param([string]$Text = 'Agent Governance Navigator')
+    return "<a href='$(Format-Html $script:NavigatorUrl)' target='_blank' rel='noopener noreferrer'>$(Format-Html $Text)<span aria-hidden='true'> &#8599;</span><span class='sr'> (opens in a new tab)</span></a>"
+}
+
+function Get-HtmlRelatedTool {
+    return "<div class='related'><b>Related tool:</b> $(Get-NavigatorLink) is an independent web tool by GitHub user akadrno that helps you choose the Microsoft tools, admin centers and products to govern, secure and manage your agents. Use it to plan the fixes for the agent findings in this report. It is a separate third-party project, not part of this script and not an official Microsoft product; nothing in this report is fetched from it.</div>"
+}
+
 function Get-HtmlAbout {
     return @'
 <div class='about-body'>
@@ -4026,8 +4040,7 @@ function Get-HtmlAbout {
 <div class='about-links'><a class='alink' href='mailto:russ.rimmerman@microsoft.com'><svg viewBox='0 0 24 24' width='16' height='16' aria-hidden='true'><path fill='none' stroke='currentColor' stroke-width='1.8' stroke-linejoin='round' d='M3 6.5h18v11H3z'/><path fill='none' stroke='currentColor' stroke-width='1.8' stroke-linejoin='round' d='M3.5 7l8.5 6.5L20.5 7'/></svg>russ.rimmerman@microsoft.com</a>
 <a class='alink' href='https://www.linkedin.com/in/russrimm' target='_blank' rel='noopener noreferrer'><svg viewBox='0 0 24 24' width='16' height='16' aria-hidden='true'><rect x='2.5' y='2.5' width='19' height='19' rx='3.5' fill='currentColor'/><path fill='var(--card)' d='M7 10h2.2v7H7zM8.1 6.8a1.3 1.3 0 110 2.6 1.3 1.3 0 010-2.6zM10.9 10H13v1c.4-.7 1.2-1.2 2.3-1.2 2.2 0 2.7 1.4 2.7 3.3V17h-2.2v-3.4c0-.9-.1-1.6-1.1-1.6s-1.4.7-1.4 1.6V17h-2.2z'/></svg>linkedin.com/in/russrimm</a></div></div></div>
 <div class='disclaimer'><b>Not an official Microsoft product.</b> This report and the script that produced it are not supported by Microsoft. They are a personal creation of Russ Rimmerman, built to help customers evaluate the current state of their overall Power Platform governance. Results are point-in-time guidance, not a guarantee of security or compliance. Validate findings against current Microsoft documentation before acting on them.</div>
-</div>
-'@
+'@ + (Get-HtmlRelatedTool) + '</div>'
 }
 
 function Get-HtmlNav {
@@ -4223,7 +4236,7 @@ function Get-HtmlRoadmap {
     }
     $critManual = @($M.Manual | Where-Object { $_.Priority -eq 'Critical' }).Count
     $manualNote = if (@($M.Manual).Count -gt 0) { " Plan time for the <a href='#manual'>$(@($M.Manual).Count) manual checklist item(s)</a> too, $critManual of them Critical." } else { '' }
-    return "<section class='panel' id='roadmap'><h2>Suggested 30/60/90-day roadmap</h2><p class='lead'>Open findings placed by severity and status: Critical goes to Contain, High and medium gaps to Standardize, the rest to later windows. Adjust each item for the customer's likelihood and impact.$manualNote</p><div class='road'>$cols</div></section>"
+    return "<section class='panel' id='roadmap'><h2>Suggested 30/60/90-day roadmap</h2><p class='lead'>Open findings placed by severity and status: Critical goes to Contain, High and medium gaps to Standardize, the rest to later windows. Adjust each item for the customer's likelihood and impact.$manualNote</p><div class='road'>$cols</div><p class='small'>Planning agent governance fixes? The independent $(Get-NavigatorLink) can help you pick the Microsoft tools and admin centers for each area.</p></section>"
 }
 
 function Get-HtmlScorecard {
@@ -4301,7 +4314,7 @@ function Get-HtmlAgents {
     $view = @($rows | Select-Object -First 100 | Select-Object Agent, Environment, Owner, Authentication, Channels, Published, Rating, RiskScore, Signals, Credits30d)
     $tbl = Format-HtmlTable -Rows $view -Columns @('Agent', 'Environment', 'Owner', 'Authentication', 'Channels', 'Published', 'Rating', 'RiskScore', 'Signals', 'Credits30d') -Limit 15 -BarColumn 'RiskScore' -ChipColumns @('Rating') -WideColumns @('Signals') -MoreLabel 'agents'
     $more = if ($rows.Count -gt 100) { " Showing the 100 highest of $($rows.Count); the full register is in agent-risk-register.csv." } else { " The full register is in agent-risk-register.csv." }
-    return "<section class='panel' id='agents'><h2>Agent risk register</h2><p class='lead'>Every agent scored from the signals the script collected: authentication, channels, sharing, tool credentials, autonomy, knowledge and ownership. Compounding signals add up, so the top of the list is where exposure, reach and action risk meet. Credits show 30-day Copilot credit use, a proxy for how much the agent is used.</p>$tiles$tbl<p class='small'>Points per signal are listed in the Signals column (for example, no authentication on a published agent adds 35, maker credentials on write-like actions adds 14). Rating: 60+ Critical, 35+ High, 15+ Medium.$more</p></section>"
+    return "<section class='panel' id='agents'><h2>Agent risk register</h2><p class='lead'>Every agent scored from the signals the script collected: authentication, channels, sharing, tool credentials, autonomy, knowledge and ownership. Compounding signals add up, so the top of the list is where exposure, reach and action risk meet. Credits show 30-day Copilot credit use, a proxy for how much the agent is used.</p>$tiles$tbl<p class='small'>Points per signal are listed in the Signals column (for example, no authentication on a published agent adds 35, maker credentials on write-like actions adds 14). Rating: 60+ Critical, 35+ High, 15+ Medium.$more</p><p class='small'>To decide which Microsoft tools and admin centers govern these agents, see the independent $(Get-NavigatorLink).</p></section>"
 }
 
 function Get-HtmlEnvironments {
@@ -4427,6 +4440,7 @@ function Get-HtmlAppendix {
 </tbody></table>
 '@)
     $log = @($script:ApiLog | Sort-Object @{ Expression = { if ($_.Ok) { 1 } else { 0 } } }, Name | Select-Object Name, Method, Endpoint, Status, Ok, Rows, Ms, Error, RequestId)
+    [void]$sb.Append("<h3>Related tools</h3>" + (Get-HtmlRelatedTool))
     if ($log.Count -gt 0) { [void]$sb.Append("<details style='margin-top:14px'><summary>API call log ($($log.Count) calls, failures first)</summary>$(Format-HtmlTable -Rows $log -Columns @('Name', 'Method', 'Endpoint', 'Status', 'Ok', 'Rows', 'Ms', 'Error', 'RequestId') -Limit 25 -MoreLabel 'calls')</details>") }
     [void]$sb.Append('</section>')
     return $sb.ToString()

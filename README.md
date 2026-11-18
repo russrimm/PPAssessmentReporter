@@ -20,6 +20,7 @@
 - [Data handling and safety](#data-handling-and-safety)
 - [Troubleshooting](#troubleshooting)
 - [Repository contents](#repository-contents)
+- [Related tools](#related-tools)
 - [Contributing, license and contact](#contributing-license-and-contact)
 
 ## What you get
@@ -581,6 +582,12 @@ Start with **Appendix > Data collection health** in the report, or `api-log.csv`
 | `CONTRIBUTING.md` | Conventions for changing the script, adding a check and keeping this reference current. |
 | `tools/Test-ReadmeCoverage.ps1` | Checks that every finding in the script appears in this README. |
 | `.gitignore`, `.gitattributes` | Exclude run folders; keep the script's encoding and line endings intact. |
+
+## Related tools
+
+- [Agent Governance Navigator](https://akadrno.github.io/agent-governance-navigator-site/) by GitHub user [akadrno](https://github.com/akadrno): an independent web tool that helps you choose the Microsoft tools, admin centers and products to govern, secure and manage your agents. Use it alongside this review to plan fixes for the Copilot Studio and agent findings.
+
+It is linked from the report (About dialog, roadmap, agent risk register and appendix) and from here, nothing more. It is a separate third-party project with no license published in its repository, so none of its content or code is copied or bundled here, and the script never contacts it: the report only contains a link. It is not affiliated with this repository and is not an official Microsoft product.
 
 ## Contributing, license and contact
 
