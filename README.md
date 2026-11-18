@@ -4,8 +4,25 @@
 
 > **Not an official Microsoft product.** This is a personal creation of Russ Rimmerman (Cloud Solution Architect), built to help customers evaluate the current state of their overall Power Platform governance. It is not supported by Microsoft. See the disclaimer at the top of the script.
 
+## What the report looks like
+
+The screenshots below come from the redacted sample report. [Open the full sample report](docs/sample-report/PowerPlatformCopilotStudioAudit.html) (download it and open it in a browser; GitHub shows HTML files as source, not rendered).
+
+**Executive summary:** maturity band and score, findings by status, open items by severity, and headline numbers.
+
+![Executive summary with maturity score, findings by status and open items by severity](docs/sample-report/report-summary.png)
+
+**Scorecard:** each of the 18 governance areas scored and placed in a maturity band.
+
+![Scorecard by assessment area](docs/sample-report/report-scorecard.png)
+
+**All findings:** filterable by status, severity and area, with evidence behind every result.
+
+![All findings with status, severity and area filters](docs/sample-report/report-findings.png)
+
 ## Contents
 
+- [What the report looks like](#what-the-report-looks-like)
 - [What you get](#what-you-get)
 - [What's new](#whats-new)
 - [Quick start](#quick-start)
