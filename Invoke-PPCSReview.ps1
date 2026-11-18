@@ -3276,7 +3276,8 @@ table.matrix td.h1{background:var(--fail-bg);color:var(--fail);font-weight:700}t
 @media (max-width:1100px){.road{grid-template-columns:1fr 1fr}}@media (max-width:720px){.road{grid-template-columns:1fr}}
 .rcol{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--card)}
 .rcol h3{margin:0;font-size:14px}.rcol .when{color:var(--muted);font-size:12px;margin-bottom:8px}
-.rcol ul{list-style:none;margin:0;padding:0;display:grid;gap:7px}.rcol li{font-size:13px;line-height:1.35}
+.rcol ul{list-style:none;margin:0;padding:0;display:grid;gap:7px}.rcol li{font-size:13px;line-height:1.35;display:grid;grid-template-columns:minmax(0,1fr) 5.5rem;gap:8px;align-items:start}
+.rcol li .chip{text-align:center;font-size:11.5px;line-height:1.4;padding:2px 6px}
 .rcol li a{text-decoration:none;color:var(--ink);font-weight:600}.rcol li .id{color:var(--muted);font-size:12px;margin-right:4px}
 .rcol details summary{cursor:pointer;color:var(--brand2);font-size:12.5px;margin-top:8px}
 .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
@@ -4213,7 +4214,7 @@ function Get-HtmlRoadmap {
             $f = $e.Finding
             $verify = if ($f.Status -eq 'Unavailable') { 'Verify: ' } else { '' }
             $also = if (@($e.Related).Count -gt 1) { " <span class='small'>(+$(@($e.Related).Count - 1) related)</span>" } else { '' }
-            "<li><span class='id'>$(Format-Html $f.Id)</span><a href='#f-$($f.Key)'>$verify$(Format-Html $f.Title)</a> $(Format-StatusChip $f.Status)$also</li>"
+            "<li><div><span class='id'>$(Format-Html $f.Id)</span><a href='#f-$($f.Key)'>$verify$(Format-Html $f.Title)</a>$also</div>$(Format-StatusChip $f.Status)</li>"
         }
         $li = @($li)
         $body = if ($li.Count -eq 0) { "<p class='small'>Nothing in this window.</p>" } else { '<ul>' + (($li | Select-Object -First 6) -join '') + '</ul>' }
