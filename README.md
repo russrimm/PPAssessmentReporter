@@ -25,11 +25,11 @@ The script only reads. It runs as a signed-in user (service principals are not s
 
 | Area | Required |
 |---|---|
-| Power Platform API, tenant settings, data policies | Power Platform Administrator (or Global Administrator) |
+| Power Platform API, tenant settings, data policies, Managed Environment settings | Power Platform Administrator (or Global Administrator) |
 | Entra checks (admin roles, PIM, Conditional Access, owners) | Global Reader, with delegated Graph `Directory.Read.All`, `RoleManagement.Read.Directory`, `Policy.Read.All` |
-| Dataverse checks (auditing, admins, transcripts, topic and flow scans) | System Administrator in each environment scanned. Tenant admins must self-elevate first. |
+| Dataverse checks (auditing, admins, transcripts and who can read them, environment security settings, agent access settings, topic and flow scans) | System Administrator in each environment scanned. Tenant admins must self-elevate first. |
 
-Anything the signed-in user cannot read is reported as "Not verified" rather than guessed.
+Anything the signed-in user cannot read is reported as "Not verified" rather than guessed. Optional hardening features that each customer decides on (Managed Environments coverage, IP firewall, cookie binding, content security policy, session timeouts, sharing limits, solution checker enforcement) are reported as informational and recommended, never as a failure.
 
 ## Output
 
