@@ -81,6 +81,86 @@
     Date by which unmanaged developer environments must be managed or removed. Default 15 Dec 2026 (confirm the
     current date on Microsoft Learn, Managed environments overview).
 
+.PARAMETER TenantId
+    Tenant domain or ID to sign in to. Defaults to the home tenant of the signed-in user.
+
+.PARAMETER ClientId
+    Public client used for device code sign-in. Default is the Microsoft Azure PowerShell client. If the Graph
+    checks return 403, supply your own public-client app registration or use -AuthMethod Az.
+
+.PARAMETER OutputPath
+    Folder for the report and exports. Default .\PPCS-Review-<timestamp>.
+
+.PARAMETER ChecklistPath
+    The framework checklist CSV (Id, Topic, Feature, Check, Verify, Target, Priority). Default PPCS-Checklist.csv
+    next to the script. When present, items that are not automated are listed as Manual and coverage is calculated.
+
+.PARAMETER PowerPlatformApiHost
+    Power Platform API host. Default api.powerplatform.com.
+
+.PARAMETER BapApiHost
+    Business Application Platform API host. Default api.bap.microsoft.com.
+
+.PARAMETER GraphHost
+    Microsoft Graph host. Default graph.microsoft.com.
+
+.PARAMETER BapResource
+    Token audience for the BAP API. Default https://service.powerapps.com.
+
+.PARAMETER SkipLegacyApis
+    Skip everything read from api.bap.microsoft.com: tenant settings, tenant isolation, data policies and
+    Managed Environment settings.
+
+.PARAMETER SkipEntra
+    Skip the Microsoft Graph checks: admin roles, PIM, Conditional Access and owner lookup.
+
+.PARAMETER SkipDataverse
+    Skip every per-environment Dataverse check.
+
+.PARAMETER SkipDeepScan
+    Skip the agent topic, knowledge and trigger scan and the flow definition scan. The agent access settings
+    check still runs.
+
+.PARAMETER SkipUsage
+    Skip the usage and adoption analysis.
+
+.PARAMETER MaxAgentComponentsPerEnvironment
+    Agent components (topics, knowledge, triggers) read per environment. Default 2000.
+
+.PARAMETER MaxFlowDefinitionsPerEnvironment
+    Cloud flow definitions read per environment. Default 300.
+
+.PARAMETER MaxEntitlementEnvironments
+    Environments whose Copilot credit entitlements are read. Default 100.
+
+.PARAMETER UsageLookbackDays
+    Look-back in days for credit consumption and flow runs. Default 30.
+
+.PARAMETER FlowRunSampleLimit
+    Cloud flows sampled for run history. Default 100. Use 0 to skip run history.
+
+.PARAMETER MaxAppSharingEnvironments
+    Environments (those with the most apps) whose app sharing counts are read. Default 25.
+
+.PARAMETER TopN
+    Rows in each top-N list. Default 15.
+
+.PARAMETER MaxDataverseEnvironments
+    Environments scanned in Dataverse, default then production then sandbox first. Default 10. A capped scan is
+    labeled Sample.
+
+.PARAMETER MaxEnvironmentSettingsCalls
+    Environments whose management settings and Managed Environment settings are read. Default 200.
+
+.PARAMETER DefaultEnvironmentAssetWarnThreshold
+    Number of apps, flows, agents and sites in the default environment above which it is flagged. Default 25.
+
+.PARAMETER EvidenceRowLimit
+    Evidence rows written per finding CSV. Default 500. The report shows the first 50.
+
+.PARAMETER OpenReport
+    Open the report when the run finishes.
+
 .EXAMPLE
     .\Invoke-PPCSReview.ps1 -OpenReport
 
@@ -149,7 +229,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$ScriptVersion = '2.0.0'
+$ScriptVersion = '2.1.0'
 if ($PSVersionTable.PSVersion.Major -lt 7) { Write-Warning 'PowerShell 7 or later is recommended. Windows PowerShell 5.1 can fail on large inventory responses.' }
 if (-not $AccessToken -and $env:PPCS_ACCESS_TOKEN) { $AccessToken = $env:PPCS_ACCESS_TOKEN }
 if (-not $OutputPath) { $OutputPath = Join-Path (Get-Location).Path ('PPCS-Review-' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
