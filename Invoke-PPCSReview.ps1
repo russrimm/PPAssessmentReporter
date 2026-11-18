@@ -42,11 +42,15 @@
         - Analytics / Advisor recommendations   security recommendations (actions page)
         - Licensing                             tenant capacity, storage warnings, billing policies
     Fallback sources (only where no api.powerplatform.com endpoint exists)
-        - api.bap.microsoft.com                 tenant settings, data policies (DLP), tenant isolation
+        - api.bap.microsoft.com                 tenant settings, data policies (DLP), tenant isolation,
+                                                  Managed Environment settings (sharing limits, solution checker)
         - Microsoft Graph                       admin roles, PIM, Conditional Access, owner lookup
         - Dataverse Web API (per environment)   System Administrator count, auditing, transcripts, solutions,
-                                                  agent topic/knowledge/trigger scan, flow definition scan,
-                                                  production roles, guests and application users
+                                                  environment security settings (IP firewall, cookie binding, guest
+                                                  access, content security policy, session timeouts),
+                                                  agent access control and sign-in settings, agent topic/knowledge/
+                                                  trigger scan, flow definition scan, production roles, guests,
+                                                  application users and Bot Transcript Viewer role holders
 
     The script never changes anything in the tenant.
 
@@ -166,6 +170,7 @@ $script:EnvFacts = @{}
 $script:EnvMap = @{}
 $script:AgentView = @()
 $script:DeepAgentRows = @()
+$script:AgentAccess = @{}
 $script:OrphanedAssets = @()
 $script:AgentCredits = @{}
 $script:OwnerNames = @{}
@@ -564,9 +569,9 @@ function Add-Finding {
 }
 
 function Add-Unavailable {
-    param([string]$Id, [string]$Title, $ApiResult, [string]$Source)
+    param([string]$Id, [string]$Title, $ApiResult, [string]$Source, [string]$Severity, [string[]]$AlsoCovers = @())
     $why = if ($ApiResult) { "HTTP $($ApiResult.Status): $($ApiResult.Error)" } else { 'Not run' }
-    Add-Finding -Id $Id -Title $Title -Status Unavailable -Detail $why -Source $Source `
+    Add-Finding -Id $Id -Title $Title -Status Unavailable -Detail $why -Source $Source -Severity $Severity -AlsoCovers $AlsoCovers `
         -Recommendation 'Check permissions or endpoint availability, then verify this item manually.'
 }
 
@@ -1015,6 +1020,142 @@ function Test-EnvironmentSettings {
         Add-Finding -Id '7.9' -Title 'Public non-production Power Pages sites allowed' -Status $(if ($pp.Count -gt 0) { 'Warning' } else { 'Pass' }) -Source $src `
             -Value "$($pp.Count) environment(s) allow public non-production sites" -Evidence @($pp) `
             -Recommendation $(if ($pp.Count -gt 0) { 'Disallow public non-production sites to reduce unreviewed exposure.' } else { '' })
+    }
+}
+
+# ------------------------------------------------------------------ Managed Environment configuration (sharing limits, solution checker)
+# Reads properties.governanceConfiguration.settings.extendedSettings from the Business Application Platform environment, the same data
+# Get-AdminPowerAppEnvironment returns. The Microsoft example settings (Implement reactive governance controls) are the yardstick.
+function Get-SharingLimit {
+    param($Mode, $MaxIndividuals, $GroupSharingDisabled = $null)
+    $m = ([string]$Mode).Trim()
+    $limited = $false
+    $text = 'No limit'
+    if ($m -eq 'disableSharing') { $limited = $true; $text = 'Sharing blocked' }
+    elseif ($m -eq 'excludeSharingToSecurityGroups' -or (-not $m -and "$GroupSharingDisabled" -eq 'true')) {
+        $limited = $true
+        $text = 'No security groups'
+        $n = 0
+        if ([int]::TryParse(([string]$MaxIndividuals), [ref]$n) -and $n -ge 0) { $text += ", up to $n individuals" }
+    }
+    return [pscustomobject]@{ Limited = $limited; Text = $text }
+}
+
+function Test-ManagedEnvironmentConfiguration {
+    param($EnvMap)
+    if ($EnvMap.Count -eq 0) { return }
+    $src = "$BapApiHost environments, governanceConfiguration (best effort; no api.powerplatform.com equivalent)"
+    $title = 'Managed Environment sharing limits and solution checker'
+    if ($SkipLegacyApis) {
+        Add-Finding -Id '7.1' -AlsoCovers @('7.6', '9.4') -Title $title -Status Unavailable -Severity 'Medium' -Source $src -Detail 'Skipped (-SkipLegacyApis). Managed Environment settings are read from api.bap.microsoft.com.'
+        return
+    }
+    $managed = @($EnvMap.Values | Where-Object { $_.IsManaged -and $_.Type -ne 'Teams' } | Sort-Object Type, Name)
+    if ($managed.Count -eq 0) {
+        Add-Finding -Id '7.1' -AlsoCovers @('7.6', '9.4') -Title $title -Status Info -Source $src -Value 'No managed environments, so sharing limits and solution checker enforcement do not apply.'
+        return
+    }
+    $cfg = @{}
+    $last = $null
+    $bapVersion = '2023-06-01'
+    $list = Invoke-Api -Name 'BAP: environments (managed environment configuration)' -Uri "https://$BapApiHost/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments?api-version=$bapVersion" -Resource $BapResource -Paged
+    if ($list.Ok) {
+        foreach ($x in @($list.Data)) {
+            $k = ([string](Get-Prop $x 'name' '')).ToLower()
+            $gc = Get-Prop $x 'properties.governanceConfiguration' $null
+            if ($k -and $null -ne $gc) { $cfg[$k] = $gc }
+        }
+    }
+    else { $last = $list }
+    # The list may leave out the settings; fall back to reading each managed environment on its own.
+    $missing = @($managed | Where-Object { -not $cfg.ContainsKey($_.Id) -or $null -eq (Get-Prop $cfg[$_.Id] 'settings.extendedSettings' $null) })
+    if ($missing.Count -gt $MaxEnvironmentSettingsCalls) { Add-Limitation 'Managed Environments' "Managed Environment settings were read for $MaxEnvironmentSettingsCalls of $($missing.Count) managed environments (-MaxEnvironmentSettingsCalls $MaxEnvironmentSettingsCalls)." }
+    foreach ($e in ($missing | Select-Object -First $MaxEnvironmentSettingsCalls)) {
+        $d = Invoke-Api -Name "BAP: environment ($($e.Name))" -Uri "https://$BapApiHost/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments/$($e.Id)?api-version=$bapVersion" -Resource $BapResource
+        if (-not $d.Ok) { $last = $d; continue }
+        $gc = Get-Prop $d.Data 'properties.governanceConfiguration' $null
+        if ($null -ne $gc) { $cfg[$e.Id] = $gc }
+    }
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($e in $managed) {
+        $x = Get-Prop $cfg[$e.Id] 'settings.extendedSettings' $null
+        if ($null -eq $x) {
+            [void]$rows.Add([pscustomobject]@{ Environment = $e.Name; Type = $e.Type; Group = $e.Group; Assessed = 'Not readable'; AppSharing = ''; AgentSharing = ''; SolutionChecker = ''; AppLimited = $false; AgentLimited = $false; Checker = ''; WelcomeKnown = $false; WelcomeSet = $false })
+            continue
+        }
+        $app = Get-SharingLimit (Get-Prop $x 'limitSharingMode' '') (Get-Prop $x 'maxLimitUserSharing' '') (Get-Prop $x 'isGroupSharingDisabled' $null)
+        $bot = Get-SharingLimit (Get-Prop $x 'bot-limitSharingMode' '') (Get-Prop $x 'bot-maxLimitUserSharing' '')
+        $noEditors = ("$(Get-Prop $x 'bot-authoringSharingDisabled' '')" -eq 'true')
+        $agentText = if ($bot.Limited -and $noEditors) { "$($bot.Text); editors cannot be added by sharing" } elseif ($noEditors) { 'Editors cannot be added by sharing' } else { $bot.Text }
+        $checker = ([string](Get-Prop $x 'solutionCheckerMode' '')).ToLower()
+        if (-not $checker) { $checker = 'none' }
+        $url = Get-Prop $x 'makerOnboardingUrl' $null
+        $markdown = Get-Prop $x 'makerOnboardingMarkdown' $null
+        [void]$rows.Add([pscustomobject]@{
+                Environment = $e.Name; Type = $e.Type; Group = $e.Group; Assessed = $(if ($e.GroupId) { 'Group rules' } else { 'Yes' })
+                AppSharing = $app.Text; AgentSharing = $agentText; SolutionChecker = ($checker.Substring(0, 1).ToUpperInvariant() + $checker.Substring(1))
+                AppLimited = $app.Limited; AgentLimited = ($bot.Limited -or $noEditors); Checker = $checker
+                WelcomeKnown = ($null -ne $url -or $null -ne $markdown)
+                WelcomeSet = (-not [string]::IsNullOrWhiteSpace([string]$url) -or -not [string]::IsNullOrWhiteSpace([string]$markdown))
+            })
+    }
+    $assessed = @($rows | Where-Object { $_.Assessed -eq 'Yes' })
+    $inGroup = @($rows | Where-Object { $_.Assessed -eq 'Group rules' })
+    $unread = @($rows | Where-Object { $_.Assessed -eq 'Not readable' })
+    $scope = "$($rows.Count) managed environment(s): $($assessed.Count) assessed here, $($inGroup.Count) in an environment group (covered by the group rule checks), $($unread.Count) not readable"
+    if ($assessed.Count -eq 0) {
+        if ($unread.Count -eq $rows.Count) {
+            if (-not $last) { $last = [pscustomobject]@{ Status = 200; Error = 'The environment response did not include governanceConfiguration settings.' } }
+            Add-Unavailable '7.1' $title $last $src -Severity 'Medium' -AlsoCovers @('7.6', '9.4')
+        }
+        else { Add-Finding -Id '7.1' -AlsoCovers @('7.6', '9.4') -Title $title -Status Info -Source $src -Value "$scope. Settings of environments in a group are set by the group rules." }
+        return
+    }
+    $optional = 'This is optional and each customer decides. '
+
+    # The Microsoft example limits sharing on the default environment only; other environment types are left without limits.
+    $def = @($assessed | Where-Object Type -eq 'Default')
+    if ($def.Count -gt 0) {
+        $d0 = $def[0]
+        $st = if ($d0.AppLimited) { 'Pass' } else { 'Info' }
+        Add-Finding -Id '7.1' -Title 'Sharing limits on the default environment (canvas apps)' -Status $st -Severity 'Medium' -Source $src `
+            -Value "Default environment '$($d0.Environment)': $($d0.AppSharing)" -Evidence @($rows | Select-Object Environment, Type, Group, Assessed, AppSharing) `
+            -Detail ($optional + 'The Microsoft example settings limit sharing in the default environment and leave other environment types without limits. ' + $scope) `
+            -Recommendation $(if ($st -ne 'Pass') { 'Recommended: limit sharing in the default environment, for example exclude sharing with security groups and cap the number of individuals (the Microsoft example uses 20), so apps do not spread across the tenant unreviewed (PPAC > Environments > Edit Managed Environments > Limit sharing).' } else { '' })
+        $st = if ($d0.AgentLimited) { 'Pass' } else { 'Info' }
+        Add-Finding -Id '9.4' -Title 'Agent sharing limits on the default environment' -Status $st -Severity 'Medium' -Source $src `
+            -Value "Default environment '$($d0.Environment)': $($d0.AgentSharing)" -Evidence @($rows | Select-Object Environment, Type, Group, Assessed, AgentSharing) `
+            -Detail ($optional + 'Agent sharing rules can stop owners from sharing with security groups or adding editors, and cap the number of viewers. ' + $scope) `
+            -Recommendation $(if ($st -ne 'Pass') { 'Recommended: set agent sharing limits in the default environment: restrict sharing with security groups, cap the number of viewers and decide whether owners may add editors (PPAC > Environments > Edit Managed Environments > Limit sharing > Agent sharing rules).' } else { '' })
+    }
+
+    # Solution checker: Block in production and default, Warn or Block in sandbox and developer, per the Microsoft example.
+    $scRows = @($assessed | Where-Object { $_.Type -in @('Production', 'Default', 'Sandbox', 'Developer') })
+    if ($scRows.Count -gt 0) {
+        $sc = @($scRows | ForEach-Object {
+                $strict = $_.Type -in @('Production', 'Default')
+                $met = if ($strict) { $_.Checker -eq 'block' } else { $_.Checker -in @('warn', 'block') }
+                [pscustomobject]@{ Environment = $_.Environment; Type = $_.Type; SolutionChecker = $_.SolutionChecker; Recommended = $(if ($strict) { 'Block' } else { 'Warn or Block' }); Meets = $(if ($met) { 'Yes' } else { 'No' }) }
+            })
+        $meets = @($sc | Where-Object Meets -eq 'Yes')
+        $dist = (($scRows | Group-Object SolutionChecker | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ', ')
+        $st = if ($meets.Count -eq $sc.Count) { 'Pass' } else { 'Info' }
+        Add-Finding -Id '7.6' -Title 'Solution checker enforcement on managed environments' -Status $st -Severity 'Medium' -Source $src `
+            -Value "$($meets.Count) of $($sc.Count) assessed managed environment(s) match the Microsoft example (Block in production and default, Warn or Block in sandbox and developer). Modes: $dist" `
+            -Evidence $sc -Detail ($optional + $scope) `
+            -Recommendation $(if ($st -ne 'Pass') { 'Recommended: turn on solution checker enforcement in managed environments, Block in production and default and Warn in sandbox and developer, so solutions with high-severity issues are caught on import (PPAC > Environments > Edit Managed Environments > Solution checker).' } else { '' })
+    }
+
+    # Maker welcome content is only judged when the environment response includes it, so a missing field is never reported as not set.
+    $known = @($assessed | Where-Object WelcomeKnown)
+    if ($known.Count -gt 0) {
+        $set = @($known | Where-Object WelcomeSet)
+        $st = if ($set.Count -eq $known.Count) { 'Pass' } else { 'Info' }
+        Add-Finding -Id '1.3' -Title 'Maker welcome content on managed environments' -Status $st -Severity 'Medium' -Source $src `
+            -Value "Maker welcome content is set in $($set.Count) of $($known.Count) assessed managed environment(s)" `
+            -Evidence @($known | Select-Object Environment, Type, @{ Name = 'WelcomeContent'; Expression = { if ($_.WelcomeSet) { 'Set' } else { 'Not set' } } }) `
+            -Detail ($optional + $scope) `
+            -Recommendation $(if ($st -ne 'Pass') { 'Recommended: add maker welcome content that explains what the environment is for, which data is allowed and who to ask for help (PPAC > Environments > Edit Managed Environments > Maker welcome content).' } else { '' })
     }
 }
 
@@ -1564,7 +1705,8 @@ function Test-Dataverse {
         if (-not $o.Ok) {
             $o = Invoke-Api -Name "Dataverse: organization basic ($($e.Name))" -Uri "$base/api/data/v9.2/organizations?`$select=name,isauditenabled" -Resource $base -ExtraHeaders $h
         }
-        if (-not $o.Ok) { $blocked++; continue }
+        if (-not $o.Ok) { Add-EnvFact $e.Id 'DvAccess' $false; $blocked++; continue }
+        Add-EnvFact $e.Id 'DvAccess' $true
         $org = @(Get-Prop $o.Data 'value' @()) | Select-Object -First 1
         [void]$audit.Add([pscustomobject]@{ Environment = $e.Name; Type = $e.Type; AuditEnabled = [bool](Get-Prop $org 'isauditenabled' $false); UserAccessAudit = Get-Prop $org 'isuseraccessauditenabled' $null; ReadAudit = Get-Prop $org 'isreadauditenabled' $null; RetentionDays = Get-Prop $org 'auditretentionperiodv2' $null })
         Add-EnvFact $e.Id 'DvAudit' ([bool](Get-Prop $org 'isauditenabled' $false))
@@ -1618,6 +1760,166 @@ function Test-Dataverse {
             -Value "$($bad.Count) production environment(s) have unmanaged solutions or no managed solutions" -Evidence @($sol) `
             -Recommendation $(if ($bad.Count -gt 0) { 'Deploy managed solutions through pipelines; do not build directly in production.' } else { '' })
     }
+}
+
+# ------------------------------------------------------------------ Dataverse environment security settings
+# The organization columns behind PPAC > environment > Settings > Product > Privacy + Security, plus the guest access setting.
+# Column names are the Dataverse logical names (restrictGuestUserAccess really is camel case).
+function Get-DataverseOrgSecurity {
+    param([string]$Base, [string]$EnvName, [hashtable]$Headers)
+    $groups = [ordered]@{
+        Network = @('enableipbasedfirewallrule', 'enableipbasedfirewallruleinauditmode', 'allowediprangeforfirewall', 'enableipbasedcookiebinding')
+        Guest = @('restrictGuestUserAccess')
+        Web = @('iscontentsecuritypolicyenabled', 'iscontentsecuritypolicyenabledforcanvas', 'contentsecuritypolicyreporturi', 'sessiontimeoutenabled', 'sessiontimeoutinmins', 'inactivitytimeoutenabled', 'inactivitytimeoutinmins')
+    }
+    $values = @{}
+    $read = New-Object System.Collections.ArrayList
+    $all = @($groups.Values | ForEach-Object { $_ })
+    $r = Invoke-Api -Name "Dataverse: security settings ($EnvName)" -Uri "$Base/api/data/v9.2/organizations?`$select=$($all -join ',')" -Resource $Base -ExtraHeaders $Headers
+    if ($r.Ok) {
+        $org = @(Get-Prop $r.Data 'value' @()) | Select-Object -First 1
+        foreach ($c in $all) { $values[$c] = Get-Prop $org $c $null }
+        foreach ($g in $groups.Keys) { [void]$read.Add($g) }
+    }
+    elseif ($r.Status -eq 400) {
+        # The service rejected a column it does not know, so ask for each group alone and lose only that group.
+        foreach ($g in $groups.Keys) {
+            $rg = Invoke-Api -Name "Dataverse: security settings, $g ($EnvName)" -Uri "$Base/api/data/v9.2/organizations?`$select=$($groups[$g] -join ',')" -Resource $Base -ExtraHeaders $Headers
+            if (-not $rg.Ok) { continue }
+            $org = @(Get-Prop $rg.Data 'value' @()) | Select-Object -First 1
+            foreach ($c in $groups[$g]) { $values[$c] = Get-Prop $org $c $null }
+            [void]$read.Add($g)
+        }
+    }
+    return [pscustomobject]@{ Values = $values; Read = @($read) }
+}
+
+function Test-DataverseEnvironmentSecurity {
+    param($EnvMap)
+    $targets = @(Get-DataverseTargets $EnvMap)
+    if ($targets.Count -eq 0) { return }
+    $src = 'Dataverse organization table per environment (needs access to each environment)'
+    $rows = New-Object System.Collections.ArrayList
+    $readBy = @{ Network = 0; Guest = 0; Web = 0 }
+    $skipped = 0
+    $onOff = { param($x) if ($null -eq $x) { 'Not reported' } elseif ([bool]$x) { 'On' } else { 'Off' } }
+    $csp = { param($enforced, $reporting) if ($null -eq $enforced) { 'Not reported' } elseif ([bool]$enforced) { 'Enforced' } elseif ($reporting) { 'Report-only' } else { 'Off' } }
+    $timeout = { param($on, $mins) if ($null -eq $on) { 'Not reported' } elseif ([bool]$on) { $(if ($mins) { "On ($mins min)" } else { 'On' }) } else { 'Off' } }
+    foreach ($e in $targets) {
+        $facts = $script:EnvFacts[([string]$e.Id).ToLower()]
+        if ($null -ne $facts -and $facts.ContainsKey('DvAccess') -and -not [bool]$facts['DvAccess']) { $skipped++; continue }
+        $s = Get-DataverseOrgSecurity -Base $e.Url.TrimEnd('/') -EnvName $e.Name -Headers (Get-DataverseHeaders)
+        if ($s.Read.Count -eq 0) { $skipped++; continue }
+        foreach ($g in $s.Read) { $readBy[$g]++ }
+        $v = $s.Values
+        $firewall = 'Not reported'
+        $enabled = $v['enableipbasedfirewallrule']
+        $auditOnly = $v['enableipbasedfirewallruleinauditmode']
+        if ($null -ne $enabled) {
+            $firewall = if (-not [bool]$enabled) { 'Off' } elseif ($null -eq $auditOnly) { 'On' } elseif ([bool]$auditOnly) { 'Audit-only' } else { 'Enforced' }
+        }
+        $ranges = $null
+        if ($null -ne $v['allowediprangeforfirewall']) { $ranges = @(([string]$v['allowediprangeforfirewall']) -split ',' | Where-Object { $_.Trim() }).Count }
+        $guest = 'Not reported'
+        if ($null -ne $v['restrictGuestUserAccess']) {
+            $guest = if ([bool]$v['restrictGuestUserAccess']) { 'Restricted' } else { 'Allowed' }
+            Add-EnvFact $e.Id 'GuestRestricted' ([bool]$v['restrictGuestUserAccess'])
+        }
+        $reporting = -not [string]::IsNullOrWhiteSpace([string]$v['contentsecuritypolicyreporturi'])
+        [void]$rows.Add([pscustomobject]@{
+                Environment = $e.Name; Type = $e.Type; Managed = $(if ($e.IsManaged) { 'Yes' } else { 'No' })
+                IpFirewall = $firewall; AllowedIpRanges = $ranges; IpCookieBinding = (& $onOff $v['enableipbasedcookiebinding']); GuestAccess = $guest
+                CspModelDriven = (& $csp $v['iscontentsecuritypolicyenabled'] $reporting); CspCanvas = (& $csp $v['iscontentsecuritypolicyenabledforcanvas'] $reporting)
+                SessionTimeout = (& $timeout $v['sessiontimeoutenabled'] $v['sessiontimeoutinmins']); InactivityTimeout = (& $timeout $v['inactivitytimeoutenabled'] $v['inactivitytimeoutinmins'])
+            })
+    }
+    if ($rows.Count -eq 0) {
+        $why = "No targeted environment could be read ($skipped not accessible). Sign in with a user that has a role in the target environments."
+        Add-Finding -Id '6.6' -Title 'IP firewall, cookie binding, content security policy and session settings' -Status Unavailable -Severity 'Medium' -Source $src -Detail $why
+        Add-Finding -Id '5.7' -Title 'Guest access to Dataverse restricted per environment' -Status Unavailable -Severity 'Medium' -Source $src -Detail $why
+        return
+    }
+    $note = "$($rows.Count) environment(s) read" + $(if ($skipped -gt 0) { "; $skipped not accessible" } else { '' })
+    $optional = 'This is optional and each customer decides. '
+
+    # 5.7 guest access: Microsoft restricts it by default for new environments, so only older ones usually differ.
+    if ($readBy.Guest -gt 0) {
+        $g = @($rows | Where-Object { $_.GuestAccess -ne 'Not reported' })
+        $open = @($g | Where-Object GuestAccess -eq 'Allowed')
+        $openCore = @($open | Where-Object { $_.Type -in @('Production', 'Default') })
+        $st = if ($openCore.Count -gt 0) { 'Warning' } elseif ($open.Count -gt 0) { 'Info' } else { 'Pass' }
+        Add-Finding -Id '5.7' -Title 'Guest access to Dataverse restricted per environment' -Status $st -Severity 'Medium' -Source $src `
+            -Value "Guest access is allowed in $($open.Count) of $($g.Count) environments ($($openCore.Count) of them production or default); $note" `
+            -Evidence @($g | Select-Object Environment, Type, GuestAccess) `
+            -Detail 'The setting (restrictGuestUserAccess) only controls guest access to Dataverse. It does not override Microsoft Entra external collaboration settings or Conditional Access.' `
+            -Recommendation $(if ($st -ne 'Pass') { 'Recommended: restrict guest access to Dataverse in production and default environments unless guests need it there (PPAC > Security > Identity and access > Guest access). Allowing it in development or test environments for partner collaboration is a supported pattern.' } else { '' })
+    }
+    else { Add-Finding -Id '5.7' -Title 'Guest access to Dataverse restricted per environment' -Status Unavailable -Severity 'Medium' -Source $src -Detail 'The restrictGuestUserAccess column could not be read in any environment.' }
+
+    # 6.6 IP firewall and cookie binding: both are Managed Environments features, so only managed production environments are measured.
+    if ($readBy.Network -gt 0) {
+        $n = @($rows | Where-Object { $_.IpFirewall -ne 'Not reported' })
+        if ($n.Count -gt 0) {
+            $mp = @($n | Where-Object { $_.Type -eq 'Production' -and $_.Managed -eq 'Yes' })
+            $enf = @($mp | Where-Object IpFirewall -eq 'Enforced')
+            $aud = @($mp | Where-Object IpFirewall -eq 'Audit-only')
+            $enfAll = @($n | Where-Object IpFirewall -eq 'Enforced')
+            $st = if ($mp.Count -gt 0 -and $enf.Count -eq $mp.Count) { 'Pass' } else { 'Info' }
+            $val = if ($mp.Count -eq 0) { "No managed production environment among the $($n.Count) read, and the IP firewall needs Managed Environments; enforced in $($enfAll.Count) of $($n.Count) environments" }
+            else { "Enforced in $($enf.Count) of $($mp.Count) managed production environment(s) ($($aud.Count) audit-only); enforced in $($enfAll.Count) of $($n.Count) environments overall" }
+            Add-Finding -Id '6.6' -Title 'IP firewall on managed production environments' -Status $st -Severity 'Medium' -Source $src -Value "$val; $note" `
+                -Evidence @($n | Select-Object Environment, Type, Managed, IpFirewall, AllowedIpRanges) `
+                -Detail ($optional + 'The IP firewall is a Managed Environments feature, and users in a protected environment also need specific Microsoft 365 licenses.') `
+                -Recommendation $(if ($st -ne 'Pass' -and $mp.Count -gt 0) { 'Recommended: consider the IP firewall for managed production environments that hold sensitive data. Try it in a test environment, run audit-only in production for at least a week, then enforce it (PPAC > Security > Identity and access > IP firewall).' } else { '' })
+        }
+        $c = @($rows | Where-Object { $_.IpCookieBinding -ne 'Not reported' })
+        if ($c.Count -gt 0) {
+            $cp = @($c | Where-Object { $_.Type -eq 'Production' -and $_.Managed -eq 'Yes' })
+            $cOn = @($cp | Where-Object IpCookieBinding -eq 'On')
+            $cAll = @($c | Where-Object IpCookieBinding -eq 'On')
+            $st = if ($cp.Count -gt 0 -and $cOn.Count -eq $cp.Count) { 'Pass' } else { 'Info' }
+            $val = if ($cp.Count -eq 0) { "No managed production environment among the $($c.Count) read, and cookie binding needs Managed Environments; on in $($cAll.Count) of $($c.Count) environments" }
+            else { "On in $($cOn.Count) of $($cp.Count) managed production environment(s); on in $($cAll.Count) of $($c.Count) environments overall" }
+            Add-Finding -Id '6.6' -Title 'IP address-based cookie binding on managed production environments' -Status $st -Severity 'Medium' -Source $src -Value "$val; $note" `
+                -Evidence @($c | Select-Object Environment, Type, Managed, IpCookieBinding) `
+                -Detail ($optional + 'Cookie binding is a Managed Environments feature. Users sign in again when their IP address changes, for example when a VPN turns on or off.') `
+                -Recommendation $(if ($st -ne 'Pass' -and $cp.Count -gt 0) { 'Recommended: consider IP address-based cookie binding for managed production environments so a stolen session cookie cannot be replayed from another network (PPAC > environment > Settings > Product > Privacy + Security).' } else { '' })
+        }
+    }
+    else { Add-Finding -Id '6.6' -Title 'IP firewall and cookie binding on managed production environments' -Status Unavailable -Severity 'Medium' -Source $src -Detail 'The IP firewall and cookie binding columns could not be read in any environment.' }
+
+    # 6.6 content security policy and session timeouts: measured on production environments, managed or not.
+    if ($readBy.Web -gt 0) {
+        $w = @($rows | Where-Object { $_.CspModelDriven -ne 'Not reported' })
+        if ($w.Count -gt 0) {
+            $wp = @($w | Where-Object Type -eq 'Production')
+            $md = @($wp | Where-Object CspModelDriven -eq 'Enforced')
+            $cv = @($wp | Where-Object CspCanvas -eq 'Enforced')
+            $ro = @($wp | Where-Object { $_.CspModelDriven -eq 'Report-only' -or $_.CspCanvas -eq 'Report-only' })
+            $full = @($wp | Where-Object { $_.CspModelDriven -eq 'Enforced' -and $_.CspCanvas -eq 'Enforced' })
+            $st = if ($wp.Count -gt 0 -and $full.Count -eq $wp.Count) { 'Pass' } else { 'Info' }
+            $val = if ($wp.Count -eq 0) { "No production environment among the $($w.Count) read" }
+            else { "Enforced for model-driven apps in $($md.Count) and for canvas apps in $($cv.Count) of $($wp.Count) production environment(s); $($ro.Count) in report-only mode" }
+            Add-Finding -Id '6.6' -Title 'Content security policy enforced on production environments' -Status $st -Severity 'Medium' -Source $src -Value "$val; $note" `
+                -Evidence @($w | Select-Object Environment, Type, CspModelDriven, CspCanvas) `
+                -Detail ($optional + 'Enforcing a policy can block scenarios that violate it, so Microsoft suggests enforcing in development or test first, report-only in production, then enforcing in production.') `
+                -Recommendation $(if ($st -ne 'Pass' -and $wp.Count -gt 0) { 'Recommended: enforce the content security policy in development and test, run report-only in production, then enforce it in production once no violations are reported (PPAC > environment > Settings > Product > Privacy + Security).' } else { '' })
+        }
+        $t = @($rows | Where-Object { $_.SessionTimeout -ne 'Not reported' })
+        if ($t.Count -gt 0) {
+            $tp = @($t | Where-Object Type -eq 'Production')
+            $sOn = @($tp | Where-Object { $_.SessionTimeout -like 'On*' })
+            $iOn = @($tp | Where-Object { $_.InactivityTimeout -like 'On*' })
+            $st = if ($tp.Count -gt 0 -and $sOn.Count -eq $tp.Count -and $iOn.Count -eq $tp.Count) { 'Pass' } else { 'Info' }
+            $val = if ($tp.Count -eq 0) { "No production environment among the $($t.Count) read" }
+            else { "Session expiration on in $($sOn.Count) and inactivity timeout on in $($iOn.Count) of $($tp.Count) production environment(s)" }
+            Add-Finding -Id '6.6' -Title 'Session expiration and inactivity timeout on production environments' -Status $st -Severity 'Medium' -Source $src -Value "$val; $note" `
+                -Evidence @($t | Select-Object Environment, Type, SessionTimeout, InactivityTimeout) `
+                -Detail ($optional + 'By default the Microsoft Entra session policy governs sessions and there is no inactivity timeout. These settings do not apply to canvas apps.') `
+                -Recommendation $(if ($st -ne 'Pass' -and $tp.Count -gt 0) { 'Recommended: consider a session length and an inactivity timeout for production environments that hold sensitive data (PPAC > environment > Settings > Product > Privacy + Security).' } else { '' })
+        }
+    }
+    else { Add-Finding -Id '6.6' -Title 'Content security policy and session timeouts on production environments' -Status Unavailable -Severity 'Medium' -Source $src -Detail 'The content security policy and session timeout columns could not be read in any environment.' }
 }
 
 # ------------------------------------------------------------------ capacity and licensing
@@ -2089,6 +2391,89 @@ function Test-DeepAgents {
         -Recommendation $(if ($sk.Count -gt 0) { 'Allow-list skills or block the Skills with Copilot Studio connector.' } else { '' })
 }
 
+# ---- agents: who may chat (access control policy) and when sign-in is asked for (Dataverse bot table)
+function Test-AgentAccessControl {
+    param($EnvMap, $AgentView)
+    $targets = @(Get-DataverseTargets $EnvMap)
+    if ($targets.Count -eq 0) { return }
+    $src = 'Dataverse bot table (accesscontrolpolicy, authenticationmode, authenticationtrigger)'
+    $policyName = @{ 0 = 'Any'; 1 = 'Agent readers'; 2 = 'Group membership'; 3 = 'Any (multi-tenant)' }
+    $modeName = @{ 0 = 'Unspecified'; 1 = 'None'; 2 = 'Integrated'; 3 = 'Custom Entra ID'; 4 = 'Generic OAuth2' }
+    $triggerName = @{ 0 = 'As needed'; 1 = 'Always' }
+    $label = { param($map, $code) if ($null -ne $code -and $map.ContainsKey([int]$code)) { $map[[int]$code] } else { 'Not reported' } }
+    $view = @{}
+    foreach ($a in @($AgentView)) { $view[([string]$a.Id).ToLower()] = $a }
+    $deep = @{}
+    foreach ($d in @($script:DeepAgentRows)) { $deep[([string]$d.AgentId).ToLower()] = $d }
+    $rows = New-Object System.Collections.ArrayList
+    $failed = 0; $read = 0
+    foreach ($e in $targets) {
+        $facts = $script:EnvFacts[([string]$e.Id).ToLower()]
+        if ($null -ne $facts -and $facts.ContainsKey('DvAccess') -and -not [bool]$facts['DvAccess']) { continue }
+        $base = $e.Url.TrimEnd('/')
+        $b = Invoke-Api -Name "Dataverse: agent access settings ($($e.Name))" -Uri "$base/api/data/v9.2/bots?`$select=botid,name,accesscontrolpolicy,authenticationmode,authenticationtrigger,publishedon" -Resource $base -Paged -MaxPages 20 -ExtraHeaders (Get-DataverseHeaders)
+        if (-not $b.Ok) { $failed++; continue }
+        $read++
+        foreach ($bot in @($b.Data)) {
+            $id = ([string]$bot.botid).ToLower()
+            $av = $view[$id]
+            $dp = $deep[$id]
+            $pol = Get-Prop $bot 'accesscontrolpolicy' $null
+            $mode = Get-Prop $bot 'authenticationmode' $null
+            $trg = Get-Prop $bot 'authenticationtrigger' $null
+            $published = [bool](Get-Prop $bot 'publishedon' $null)
+            if (-not $published -and $av -and $av.LastPublished) { $published = $true }
+            $makerTools = if ($av) { @($av.Ops | Where-Object { $_.Provider -eq 'Maker' -and $_.UsedAs -ne 'Knowledge' }).Count } else { 0 }
+            $spKnowledge = [bool]($dp -and $dp.SharePointSites)
+            $multi = ($null -ne $pol -and [int]$pol -eq 3)
+            $manual = ($null -ne $mode -and [int]$mode -in @(3, 4))
+            $asNeeded = ($manual -and $null -ne $trg -and [int]$trg -eq 0)
+            [void]$rows.Add([pscustomobject]@{
+                    Agent = [string]$bot.name; Environment = $e.Name; AgentId = $id; Published = $(if ($published) { 'Yes' } else { 'No' })
+                    AccessPolicy = (& $label $policyName $pol); Authentication = (& $label $modeName $mode); SignIn = (& $label $triggerName $trg)
+                    Channels = $(if ($av) { [string]$av.Channels } else { '' }); MakerCredentialTools = $makerTools; SharePointKnowledge = $(if ($spKnowledge) { 'Yes' } else { 'No' })
+                    HasPolicy = ($null -ne $pol); MultiTenant = $multi; ManualAuth = $manual; SignInAsNeeded = $asNeeded
+                })
+            $script:AgentAccess[$id] = @{ MultiTenant = $multi; SignInAsNeeded = $asNeeded; Published = $published }
+        }
+    }
+    if ($rows.Count -eq 0) {
+        if ($read -eq 0 -and $failed -gt 0) {
+            Add-Finding -Id '9.1' -Title 'Agent access control and sign-in settings' -Status Unavailable -Severity 'Medium' -Source $src `
+                -Detail "The bot table could not be read in $failed environment(s). Needs a Dataverse role that can read agents."
+        }
+        return
+    }
+    $note = "$($rows.Count) agents in $read environment(s)" + $(if ($failed -gt 0) { "; $failed environment(s) not readable" } else { '' })
+
+    # Access control policy: Any (multi-tenant) is the policy behind Copilot Studio multitenant mode (preview).
+    $withPolicy = @($rows | Where-Object HasPolicy)
+    if ($withPolicy.Count -gt 0) {
+        $multiRows = @($withPolicy | Where-Object MultiTenant)
+        $dist = (($withPolicy | Group-Object AccessPolicy | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ', ')
+        $st = if ($multiRows.Count -gt 0) { 'Warning' } else { 'Pass' }
+        Add-Finding -Id '9.1' -Title 'Agents reachable from other Microsoft Entra tenants (multitenant access)' -Status $st -Severity 'High' -Source $src `
+            -Value "$($multiRows.Count) of $($withPolicy.Count) agent(s) use the access control policy Any (multi-tenant). All agents: $dist; $note" `
+            -Evidence @($multiRows | Select-Object Agent, Environment, Published, Authentication, Channels) `
+            -Detail 'The access control policy defines which users may chat with an agent. Any (multi-tenant) matches Copilot Studio multitenant mode (preview), where users from other Microsoft Entra tenants can use an agent hosted in this tenant.' `
+            -Recommendation $(if ($st -ne 'Pass') { 'Confirm each of these agents is meant to be used from other Microsoft Entra tenants and turn multitenant mode off where it is not. Turning on tenant isolation (PPAC > Security > Identity and access) also blocks multitenant use.' } else { '' })
+    }
+
+    # Sign-in trigger: with manual authentication and Require users to sign in off, the agent only asks for sign-in when a topic needs it.
+    $manualRows = @($rows | Where-Object { $_.ManualAuth -and $_.SignIn -ne 'Not reported' })
+    if ($manualRows.Count -gt 0) {
+        $live = @($manualRows | Where-Object { $_.Published -eq 'Yes' })
+        $late = @($live | Where-Object SignInAsNeeded)
+        $exposed = @($late | Where-Object { $_.MakerCredentialTools -gt 0 -or $_.SharePointKnowledge -eq 'Yes' })
+        $st = if ($exposed.Count -gt 0) { 'Warning' } elseif ($late.Count -gt 0) { 'Info' } else { 'Pass' }
+        Add-Finding -Id '9.1' -Title 'Agents that do not ask users to sign in up front' -Status $st -Severity 'High' -Source $src `
+            -Value "$($late.Count) of $($live.Count) published agent(s) with manual authentication do not ask users to sign in until a topic needs it. Among those, agents that also use maker credentials or SharePoint knowledge: $($exposed.Count); $note" `
+            -Evidence @($late | Select-Object Agent, Environment, Authentication, SignIn, Channels, MakerCredentialTools, SharePointKnowledge) `
+            -Detail 'With manual authentication and Require users to sign in turned off, an agent does not ask users to sign in until it reaches a topic that requires it. That suits public content but not agents that reach sensitive or restricted information.' `
+            -Recommendation $(if ($st -ne 'Pass') { 'Turn on Require users to sign in for agents that reach sensitive or restricted information (Copilot Studio > Settings > Security > Authentication). Leave it off only for agents that are meant to be public.' } else { '' })
+    }
+}
+
 # ---- flows: definition scan (Dataverse workflows)
 function Test-DeepFlows {
     param($EnvMap)
@@ -2148,7 +2533,10 @@ function Test-DataverseAccess {
     if ($targets.Count -eq 0) { return }
     $src = 'Dataverse security roles and users per environment'
     $makers = New-Object System.Collections.ArrayList; $guests = New-Object System.Collections.ArrayList; $appAdmins = New-Object System.Collections.ArrayList
-    $ok = 0
+    $viewers = New-Object System.Collections.ArrayList
+    $ok = 0; $viewersRead = 0; $viewersNoTeams = 0
+    $tvUsers = 'systemuserroles_association($select=fullname,domainname,isdisabled,accessmode,applicationid)'
+    $tvTeams = 'teamroles_association($select=name,teamtype,azureactivedirectoryobjectid)'
     foreach ($e in $targets) {
         $base = $e.Url.TrimEnd('/'); $h = Get-DataverseHeaders
         $uri = "$base/api/data/v9.2/roles?`$select=name&`$filter=name eq 'Environment Maker' or name eq 'System Customizer' or name eq 'System Administrator'&`$expand=systemuserroles_association(`$select=fullname,domainname,isdisabled,accessmode,applicationid)"
@@ -2166,6 +2554,46 @@ function Test-DataverseAccess {
         }
         $g = Invoke-Api -Name "Dataverse: guest users ($($e.Name))" -Uri ("$base/api/data/v9.2/systemusers?`$select=fullname,domainname&`$filter=isdisabled eq false and contains(domainname,'" + [uri]::EscapeDataString('#EXT#') + "')&`$top=200") -Resource $base -ExtraHeaders $h
         if ($g.Ok) { foreach ($u in @(Get-Prop $g.Data 'value' @())) { [void]$guests.Add([pscustomobject]@{ Environment = $e.Name; Type = $e.Type; Guest = $u.fullname; Upn = $u.domainname }) } }
+        # Users and teams that hold the Bot Transcript Viewer role. Teams are expanded because role assignment through group teams is the recommended practice.
+        $tv = Invoke-Api -Name "Dataverse: transcript viewers ($($e.Name))" -Uri "$base/api/data/v9.2/roles?`$select=name&`$filter=name eq 'Bot Transcript Viewer'&`$expand=$tvUsers,$tvTeams" -Resource $base -ExtraHeaders $h
+        $teamsRead = $true
+        if (-not $tv.Ok -and $tv.Status -eq 400) {
+            $teamsRead = $false
+            $tv = Invoke-Api -Name "Dataverse: transcript viewers, users only ($($e.Name))" -Uri "$base/api/data/v9.2/roles?`$select=name&`$filter=name eq 'Bot Transcript Viewer'&`$expand=$tvUsers" -Resource $base -ExtraHeaders $h
+        }
+        if ($tv.Ok) {
+            $viewersRead++
+            if (-not $teamsRead) { $viewersNoTeams++ }
+            $seen = @{}
+            foreach ($role in @(Get-Prop $tv.Data 'value' @())) {
+                foreach ($u in @(Get-Prop $role 'systemuserroles_association' @())) {
+                    if ($null -eq $u -or $u.isdisabled) { continue }
+                    $key = [string]$u.domainname; if (-not $key) { $key = [string]$u.fullname }
+                    if ($seen.ContainsKey("U|$key")) { continue }
+                    $seen["U|$key"] = 1
+                    $holder = if ($u.applicationid -or $u.accessmode -eq 4) { 'Application user' } else { 'User' }
+                    [void]$viewers.Add([pscustomobject]@{ Environment = $e.Name; Type = $e.Type; Holder = $holder; Name = [string]$u.fullname; Account = [string]$u.domainname })
+                }
+                foreach ($tm in @(Get-Prop $role 'teamroles_association' @())) {
+                    if ($null -eq $tm) { continue }
+                    $key = [string]$tm.name
+                    if ($seen.ContainsKey("T|$key")) { continue }
+                    $seen["T|$key"] = 1
+                    $kind = switch ([string]$tm.teamtype) { '0' { 'Owner team' } '1' { 'Access team' } '2' { 'Entra security group team' } '3' { 'Entra Microsoft 365 group team' } default { 'Team' } }
+                    [void]$viewers.Add([pscustomobject]@{ Environment = $e.Name; Type = $e.Type; Holder = $kind; Name = $key; Account = [string]$tm.azureactivedirectoryobjectid })
+                }
+            }
+        }
+    }
+    if ($viewersRead -gt 0) {
+        $viewerUsers = @($viewers | Where-Object { $_.Holder -in @('User', 'Application user') })
+        $viewerTeams = @($viewers | Where-Object { $_.Holder -notin @('User', 'Application user') })
+        $teamNote = if ($viewersNoTeams -gt 0) { " Team assignments could not be read in $viewersNoTeams environment(s), so only direct user assignments are listed there." } else { '' }
+        Add-Finding -Id '6.5' -AlsoCovers @('9.8') -Title 'Who can read conversation transcripts (Bot Transcript Viewer role)' -Status $(if ($viewers.Count -gt 0) { 'Info' } else { 'Pass' }) -Severity 'Medium' -Source $src `
+            -Value "$($viewerUsers.Count) user(s) and $($viewerTeams.Count) team(s) hold the Bot Transcript Viewer role in $viewersRead environment(s) read" `
+            -Evidence @($viewers | Select-Object -First $EvidenceRowLimit) `
+            -Detail ('The role lets its holders read conversation transcripts. System Administrators can also read every transcript (see the System Administrator count in 6.1).' + $teamNote) `
+            -Recommendation $(if ($viewers.Count -gt 0) { 'Recommended: keep this role to the people who review conversations, assign it through a group team, and review the membership regularly. Transcripts can hold personal data and anything users typed.' } else { '' })
     }
     if ($ok -eq 0) { Add-Finding -Id '3.3' -Title 'Production least privilege' -Status Unavailable -Source $src -Detail 'Role membership could not be read in any target environment.'; return }
     $prodMakers = @($makers | Where-Object Type -eq 'Production')
@@ -2426,6 +2854,9 @@ function Get-AgentRiskRegister {
         }
         elseif ($open) { [void]$sigs.Add([pscustomobject]@{ P = 8; T = 'Open web or external channel' }) }
         if ($a.EntireTenant) { [void]$sigs.Add([pscustomobject]@{ P = 12; T = 'Shared with the entire tenant' }) }
+        $acc = $script:AgentAccess[$id]
+        if ($acc -and $acc.MultiTenant) { [void]$sigs.Add([pscustomobject]@{ P = 12; T = 'Usable from other Microsoft Entra tenants' }) }
+        if ($acc -and $acc.SignInAsNeeded -and $acc.Published) { [void]$sigs.Add([pscustomobject]@{ P = 6; T = 'Asks for sign-in only when a topic needs it' }) }
         if (($a.EditorUsers + $a.EditorGroups) -gt 5) { [void]$sigs.Add([pscustomobject]@{ P = 4; T = 'More than 5 co-authors' }) }
         $maker = @($a.Ops | Where-Object { $_.Provider -eq 'Maker' -and $_.UsedAs -ne 'Knowledge' })
         if ($maker.Count -gt 0) { [void]$sigs.Add([pscustomobject]@{ P = 8; T = "Maker credentials on $($maker.Count) tool operation(s)" }) }
@@ -2494,6 +2925,7 @@ function Get-EnvironmentProfile {
         }
         if ($null -ne $facts -and $facts.ContainsKey('ConvAudit') -and $null -ne $facts['ConvAudit'] -and -not [bool]$facts['ConvAudit']) { AddFlag 10 'Conversation audit logging is off' }
         if ($null -ne $facts -and $facts.ContainsKey('DvAudit') -and -not [bool]$facts['DvAudit']) { AddFlag $(if ($isProd) { 15 } else { 6 }) 'Dataverse auditing is off' }
+        if ($null -ne $facts -and $facts.ContainsKey('GuestRestricted') -and -not [bool]$facts['GuestRestricted'] -and $isProd) { AddFlag 8 'Guest access to Dataverse is allowed' }
         if ($e.Type -eq 'Production' -and $e.Retention -eq 'P7D') { AddFlag 5 'Production backups kept 7 days' }
         if ($e.Type -eq 'Default' -and $assets -gt $DefaultEnvironmentAssetWarnThreshold) { AddFlag 15 "$assets assets live in the default environment" }
         if ($unauth.ContainsKey($k)) { AddFlag ([Math]::Min(20, 10 * [int]$unauth[$k])) "$($unauth[$k]) published agent(s) with no authentication" }
@@ -3000,6 +3432,7 @@ function Format-HtmlTable {
 # ------------------------------------------------------------------ Why it is recommended
 # One plain sentence per control. First matching rule wins; Title is an optional extra filter.
 $WhyRules = @(
+    @{ Id = '^1\.3$'; Title = 'welcome content'; Why = 'Welcome content tells new makers where to build, what data is allowed and who to ask, before they create anything.' }
     @{ Id = '^1\.3$'; Why = 'Environment group rules apply governance consistently to every environment in the group instead of one at a time.' }
     @{ Id = '^1\.[67]$'; Why = 'You cannot govern what you cannot see, so a current inventory of apps, flows and agents is the baseline for every other control.' }
     @{ Id = '^2\.1$'; Why = 'Standing admin accounts are the highest-value targets in the tenant, so fewer of them means less damage if one is compromised.' }
@@ -3028,17 +3461,27 @@ $WhyRules = @(
     @{ Id = '^5\.1$'; Why = 'MFA and Conditional Access protect makers, admins and agent users from stolen or phished credentials.' }
     @{ Id = '^5\.3$'; Why = 'Authentication rules make sure every agent in the group requires users to sign in.' }
     @{ Id = '^5\.4$'; Why = 'Application users with System Administrator hold powerful non-interactive access that is easy to forget and hard to audit.' }
+    @{ Id = '^5\.7$'; Title = 'Guest access to Dataverse'; Why = 'Restricting guest access keeps external B2B users out of Dataverse data and apps in that environment, which matters most in production.' }
     @{ Id = '^5\.7$'; Why = 'Guest users can reach business data, so each one should be intentional and reviewed.' }
     @{ Id = '^5\.8$'; Why = 'Assets owned by deleted or disabled people have no one accountable and often keep running with stale connections.' }
     @{ Id = '^6\.1$'; Why = 'Many System Administrators means many people who can read all data and change security, so least privilege reduces risk.' }
     @{ Id = '^6\.4$'; Why = 'Auditing is the evidence trail for who accessed or changed data, and it has to be on before an incident happens.' }
+    @{ Id = '^6\.5$'; Title = 'Bot Transcript Viewer'; Why = 'Holders of this role can read conversation transcripts, which can contain personal data, so the group should stay small and reviewed.' }
     @{ Id = '^6\.5$'; Why = 'Conversation transcripts can hold personal data, so retention and access should be limited to what the business needs.' }
+    @{ Id = '^6\.6$'; Title = 'IP firewall'; Why = 'The IP firewall rejects Dataverse requests, and replayed tokens, that come from outside the IP ranges you approve.' }
+    @{ Id = '^6\.6$'; Title = 'cookie binding'; Why = 'Binding the session cookie to the sign-in IP address stops a stolen cookie from being replayed from another network.' }
+    @{ Id = '^6\.6$'; Title = 'Content security policy'; Why = 'A content security policy limits what scripts, frames and connections apps can use, which reduces cross-site scripting and clickjacking risk.' }
+    @{ Id = '^6\.6$'; Title = 'Session'; Why = 'Session and inactivity timeouts limit how long an unattended or hijacked session stays usable.' }
+    @{ Id = '^6\.6$'; Why = 'These environment settings narrow who can reach Dataverse and for how long, which limits the damage from stolen credentials or sessions.' }
     @{ Id = '^6\.7$'; Why = 'Virtual network injection keeps Dataverse and connector traffic on your private network.' }
     @{ Id = '^6\.8$'; Why = 'Customer-managed keys give you control over the encryption keys protecting regulated data.' }
     @{ Id = '^6\.9$'; Why = 'Longer backup retention gives you more recovery options after accidental deletion or corruption of production data.' }
+    @{ Id = '^7\.1$'; Title = 'default environment'; Why = 'Sharing limits keep apps in the default environment from spreading across the tenant without review.' }
+    @{ Id = '^7\.1$'; Title = 'solution checker'; Why = 'Managed Environments add sharing limits and solution checker enforcement, which control what makers can share and what reaches production.' }
     @{ Id = '^7\.[12]$'; Why = 'Sharing with Everyone exposes apps and connections to the whole organization, including guests where allowed.' }
     @{ Id = '^7\.4$'; Why = 'Unowned or long-unchanged apps keep live connections and access without anyone maintaining them.' }
     @{ Id = '^7\.5$'; Why = 'Code apps run custom code outside the low-code guardrails, so they need review and an allow-list.' }
+    @{ Id = '^7\.6$'; Title = 'enforcement'; Why = 'Enforcement turns solution checker from advice into a gate, so risky solutions are caught on import instead of in production.' }
     @{ Id = '^7\.6$'; Why = 'Solution checker finds security and quality issues before solutions reach production.' }
     @{ Id = '^7\.9$'; Why = 'Anonymous Power Pages sites are exposed to the internet, so site visibility and table permissions must be deliberate.' }
     @{ Id = '^8\.1$'; Title = 'Orphaned'; Why = 'Flows owned by deleted or disabled accounts can fail or keep running with no one accountable.' }
@@ -3048,8 +3491,11 @@ $WhyRules = @(
     @{ Id = '^8\.3$'; Why = 'Secrets stored in flow definitions can be read by anyone with access to the flow and are hard to rotate.' }
     @{ Id = '^8\.6$'; Why = 'Flows and apps that send data to external services can move business data outside approved boundaries.' }
     @{ Id = '^8\.8$'; Why = 'A suspended flow usually means repeated failures, so the process it automates is silently not running.' }
+    @{ Id = '^9\.1$'; Title = 'multitenant'; Why = 'An agent open to other Microsoft Entra tenants can be used by people outside your organization, so each one should be a deliberate choice.' }
+    @{ Id = '^9\.1$'; Title = 'sign.in'; Why = 'When sign-in waits until a topic asks for it, anyone can start a conversation, so agents that reach sensitive data should require sign-in first.' }
     @{ Id = '^9\.1$'; Why = 'Agents without authentication answer anyone, so they must not be able to reach internal knowledge or actions.' }
     @{ Id = '^9\.[23]$'; Why = 'Open and website channels expose agents to the internet, where an unauthenticated agent can leak data or be abused.' }
+    @{ Id = '^9\.4$'; Title = 'sharing limits'; Why = 'Sharing limits control how widely an agent spreads and whether owners can add editors without an admin.' }
     @{ Id = '^9\.4$'; Why = 'Sharing an agent tenant-wide puts it in front of every user, guests included.' }
     @{ Id = '^9\.6$'; Why = 'Environment group rules for Copilot settings enforce one standard for agent behavior.' }
     @{ Id = '^9\.7$'; Title = 'secret'; Why = 'Secrets written into agent topics can be read by anyone who can edit or export the agent and are hard to rotate.' }
@@ -3178,10 +3624,21 @@ $Learn = @{
     CSBilling      = @('Billing rates and management', 'microsoft-copilot-studio/requirements-messages-management')
     CSGovernCredit = @('Govern Copilot Credit consumption', 'microsoft-copilot-studio/guidance/govern-credit-consumption')
     CSDataMove     = @('Configure data movement across geographic locations', 'microsoft-copilot-studio/manage-data-movement-outside-us')
+    IpFirewall     = @('IP firewall in Power Platform environments', 'power-platform/admin/ip-firewall')
+    CookieBinding  = @('Safeguard Dataverse sessions with IP cookie binding', 'power-platform/admin/block-cookie-replay-attack')
+    GuestAccess    = @('Control guest access in Power Platform environments', 'power-platform/admin/security/guest-access')
+    CSP            = @('Content security policy', 'power-platform/admin/content-security-policy')
+    SessionMgmt    = @('Security enhancements for user sessions and access management', 'power-platform/admin/user-session-management')
+    PrivacySecurity = @('Manage privacy and security settings', 'power-platform/admin/settings-privacy-security')
+    IdentityAccess = @('Identity and access management', 'power-platform/admin/security/identity-access-management')
+    ReactiveGov    = @('Implement reactive governance controls', 'power-platform/guidance/adoption/reactive-governance')
+    WelcomeContent = @('Maker welcome content', 'power-platform/admin/welcome-content')
+    CSMultitenant  = @('Multitenant mode in Copilot Studio (preview)', 'microsoft-copilot-studio/multi-tenant-overview')
 }
 
 # First matching rule wins (checked in order); Title is an optional extra filter. Topic defaults fill up to three links.
 $LearnRules = @(
+    @{ Id = '^1\.3$'; Title = 'welcome content'; Links = 'WelcomeContent', 'ReactiveGov', 'EnvGroupRules' }
     @{ Id = '^1\.3$'; Links = 'EnvGroupRules', 'EnvGroups' }
     @{ Id = '^1\.[67]$'; Links = 'Inventory', 'InventoryApi', 'CSGuidance' }
     @{ Id = '^2\.[12]$'; Links = 'AdminRoles', 'PIM', 'EntraRoleBP' }
@@ -3203,16 +3660,25 @@ $LearnRules = @(
     @{ Id = '^5\.1$'; Links = 'CA', 'CATemplates', 'SecOverview' }
     @{ Id = '^5\.3$'; Links = 'EnvGroupRules', 'CSAuth' }
     @{ Id = '^5\.8$'; Links = 'Inventory', 'InventoryApi', 'CSQuarantine' }
+    @{ Id = '^5\.7$'; Title = 'Guest access to Dataverse'; Links = 'GuestAccess', 'IdentityAccess' }
     @{ Id = '^5\.[47]$'; Links = 'SecOverview', 'SecRoles' }
     @{ Id = '^6\.1$'; Links = 'SecRoles', 'SecOverview' }
     @{ Id = '^6\.4$'; Links = 'Auditing', 'AdminLogs' }
     @{ Id = '^6\.5$'; Links = 'CSTranscripts', 'SecRoles' }
+    @{ Id = '^6\.6$'; Title = 'IP firewall'; Links = 'IpFirewall', 'IdentityAccess', 'ManagedOverview' }
+    @{ Id = '^6\.6$'; Title = 'cookie binding'; Links = 'CookieBinding', 'IdentityAccess', 'ManagedOverview' }
+    @{ Id = '^6\.6$'; Title = 'Content security policy'; Links = 'CSP', 'PrivacySecurity' }
+    @{ Id = '^6\.6$'; Title = 'Session'; Links = 'SessionMgmt', 'PrivacySecurity' }
+    @{ Id = '^6\.6$'; Links = 'PrivacySecurity', 'IdentityAccess' }
     @{ Id = '^6\.7$'; Links = 'VNet', 'SecOverview' }
     @{ Id = '^6\.8$'; Links = 'CMK', 'SecOverview' }
     @{ Id = '^6\.9$'; Links = 'Backup', 'EnvOverview' }
+    @{ Id = '^7\.1$'; Title = 'default environment'; Links = 'SharingLimits', 'SecureDefault', 'ReactiveGov' }
+    @{ Id = '^7\.1$'; Title = 'solution checker'; Links = 'ManagedOverview', 'SharingLimits', 'SolutionChecker' }
     @{ Id = '^7\.[12]$'; Links = 'SharingLimits', 'ShareApp', 'EnvGroupRules' }
     @{ Id = '^7\.4$'; Links = 'Inventory', 'UsageInsights', 'ManagedOverview' }
     @{ Id = '^7\.5$'; Links = 'CodeApps', 'ManagedOverview' }
+    @{ Id = '^7\.6$'; Title = 'enforcement'; Links = 'SolutionChecker', 'ReactiveGov', 'ALM' }
     @{ Id = '^7\.6$'; Links = 'SolutionChecker', 'ALM', 'EnvGroupRules' }
     @{ Id = '^7\.9$'; Links = 'PagesSecurity', 'SiteVisibility', 'PagesBP' }
     @{ Id = '^8\.1$'; Title = 'default environment'; Links = 'SecureDefault', 'EnvStrategy' }
@@ -3223,8 +3689,10 @@ $LearnRules = @(
     @{ Id = '^8\.6$'; Links = 'DlpStrategy', 'EndpointFilter', 'ConnClass' }
     @{ Id = '^8\.8$'; Links = 'FlowLimits', 'Advisor' }
     @{ Id = '^8\.'; Links = 'SecureInputs', 'DLP' }
+    @{ Id = '^9\.1$'; Title = 'multitenant'; Links = 'CSMultitenant', 'CrossTenant', 'CSAuth' }
     @{ Id = '^9\.1$'; Links = 'CSAuth', 'CSSecurity' }
     @{ Id = '^9\.[23]$'; Links = 'CSChannels', 'CSWeb', 'CSAuth' }
+    @{ Id = '^9\.4$'; Title = 'sharing limits'; Links = 'SharingLimits', 'CSShare', 'SecureDefault' }
     @{ Id = '^9\.4$'; Links = 'CSShare', 'CSSecurity' }
     @{ Id = '^9\.6$'; Links = 'EnvGroupRules', 'CSSecurity' }
     @{ Id = '^9\.7$'; Title = 'secret'; Links = 'KeyVaultEnv', 'Secrets', 'CSSecurity' }
@@ -3908,9 +4376,9 @@ function Invoke-Review {
     }
 
     if ($AuthMethod -eq 'Token') { Add-Limitation 'Authentication' 'AuthMethod Token covers api.powerplatform.com only, so Microsoft Graph, BAP and Dataverse checks could not run.' }
-    if ($SkipLegacyApis) { Add-Limitation 'Scope' 'Tenant settings, tenant isolation and data policies were skipped (-SkipLegacyApis).' }
+    if ($SkipLegacyApis) { Add-Limitation 'Scope' 'Tenant settings, tenant isolation, data policies and Managed Environment settings were skipped (-SkipLegacyApis).' }
     if ($SkipEntra) { Add-Limitation 'Scope' 'Admin roles, PIM, Conditional Access and owner lookups were skipped (-SkipEntra).' }
-    if ($SkipDataverse) { Add-Limitation 'Scope' 'All Dataverse checks were skipped (-SkipDataverse): auditing, admin counts, transcripts, solutions, production roles, agent topics and flow definitions.' }
+    if ($SkipDataverse) { Add-Limitation 'Scope' 'All Dataverse checks were skipped (-SkipDataverse): auditing, admin counts, transcripts, solutions, environment security settings, production roles, agent access settings, agent topics and flow definitions.' }
     elseif ($SkipDeepScan) { Add-Limitation 'Scope' 'Agent topic, knowledge and trigger scans and flow definition scans were skipped (-SkipDeepScan).' }
     if ($SkipUsage) { Add-Limitation 'Scope' 'The usage and adoption analysis was skipped (-SkipUsage).' }
 
@@ -3926,6 +4394,7 @@ function Invoke-Review {
 
     Invoke-Step 'Environments' '3.2' { Test-Environments -EnvMap $envMap -Inv $inv }
     Invoke-Step 'Environment settings' '14.1' { Test-EnvironmentSettings -EnvMap $envMap }
+    Invoke-Step 'Managed Environment settings' '7.1' { Test-ManagedEnvironmentConfiguration -EnvMap $envMap }
     Invoke-Step 'Environment group rules' '3.7' { Test-RuleSets }
     Invoke-Step 'Advisor recommendations' '2.6' { Test-AdvisorRecommendations }
     Invoke-Step 'Capacity and billing' '15.3' { Test-Capacity }
@@ -3944,11 +4413,13 @@ function Invoke-Review {
     Invoke-Step 'shadow environments' '2.4' { Test-ShadowEnvironments -EnvMap $envMap }
     if (-not $SkipDataverse) {
         Invoke-Step 'Dataverse (per environment)' '6.4' { Test-Dataverse -EnvMap $envMap }
+        Invoke-Step 'Dataverse environment security settings' '6.6' { Test-DataverseEnvironmentSecurity -EnvMap $envMap }
         Invoke-Step 'Dataverse access review' '3.3' { Test-DataverseAccess -EnvMap $envMap }
         if (-not $SkipDeepScan) {
             Invoke-Step 'agent topics, knowledge and triggers (Dataverse)' '9.7' { Test-DeepAgents -EnvMap $envMap -AgentView $agentView }
             Invoke-Step 'flow definitions (Dataverse)' '8.2' { Test-DeepFlows -EnvMap $envMap }
         }
+        Invoke-Step 'agent access control and sign-in (Dataverse)' '9.1' { Test-AgentAccessControl -EnvMap $envMap -AgentView $agentView }
     }
 
     if ($script:Kpi.Count -gt 0) {
