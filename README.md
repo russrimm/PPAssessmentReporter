@@ -131,6 +131,8 @@ The script never changes anything in the tenant. Every call is a read; a few rea
 
 ## Reading the report
 
+A redacted sample of the generated report is included so you can see what it looks like: [docs/sample-report/PowerPlatformCopilotStudioAudit.html](docs/sample-report/PowerPlatformCopilotStudioAudit.html). Download it and open it in a browser (GitHub shows HTML files as source, not rendered).
+
 The navigation bar jumps between Summary, Start here, Roadmap, Scorecard, Usage, Agents, Environments, All findings, Manual checks and Appendix. The findings list can be filtered by status, severity and area, searched, and expanded or collapsed. There is a light and a dark theme, and the page prints cleanly.
 
 ### Results
