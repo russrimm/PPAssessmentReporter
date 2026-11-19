@@ -4,9 +4,9 @@
 
 .DESCRIPTION
     Parses the review script, finds each Add-Finding / Add-Unavailable call, and confirms the README check
-    reference has a row for the finding's ID and mentions its title. Titles built with variables are matched on
+    reference has an entry (a bullet that starts with the finding ID) for the finding's ID and mentions its title. Titles built with variables are matched on
     their fixed leading text. Calls that only
-    report a step as Not verified (Add-Unavailable or -Status Unavailable) must have an ID row but their title is
+    report a step as Not verified (Add-Unavailable or -Status Unavailable) must have an ID entry but their title is
     not required, because the README documents that fallback once. Run it after adding or renaming a check; it
     exits with code 1 when anything is missing.
 
@@ -15,17 +15,21 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ScriptPath = (Join-Path $PSScriptRoot '..\Invoke-PPCSReview.ps1'),
-    [string]$ReadmePath = (Join-Path $PSScriptRoot '..\README.md')
+    [string]$ScriptPath,
+    [string]$ReadmePath
 )
 
 $ErrorActionPreference = 'Stop'
+# $PSScriptRoot is not set yet while parameter defaults are evaluated on Windows PowerShell 5.1, so defaults are resolved here.
+$repoRoot = Split-Path -Parent $(if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path })
+if (-not $ScriptPath) { $ScriptPath = Join-Path $repoRoot 'Invoke-PPCSReview.ps1' }
+if (-not $ReadmePath) { $ReadmePath = Join-Path $repoRoot 'README.md' }
 $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $ScriptPath).Path, [ref]$null, [ref]$errors)
 if ($errors.Count) { throw "The script has $($errors.Count) parse error(s)." }
 $readme = [IO.File]::ReadAllText((Resolve-Path $ReadmePath).Path)
 $rowIds = @{}
-foreach ($m in [regex]::Matches($readme, '(?m)^\| (\d+\.\d+) \|')) { $rowIds[$m.Groups[1].Value] = $true }
+foreach ($m in [regex]::Matches($readme, '(?m)^- \*\*(\d+\.\d+)\*\*')) { $rowIds[$m.Groups[1].Value] = $true }
 
 $calls = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -in @('Add-Finding', 'Add-Unavailable') }, $true)
 $missing = New-Object System.Collections.Generic.List[string]
@@ -50,7 +54,7 @@ foreach ($c in $calls) {
     if ($id -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { continue }
     $checked++
     $line = $c.Extent.StartLineNumber
-    if (-not $rowIds.ContainsKey($id.Value)) { $missing.Add("Line ${line}: ID $($id.Value) has no row in the README reference."); continue }
+    if (-not $rowIds.ContainsKey($id.Value)) { $missing.Add("Line ${line}: ID $($id.Value) has no entry in the README reference."); continue }
     $text = $null
     $unverifiedOnly = $c.GetCommandName() -eq 'Add-Unavailable' -or $c.Extent.Text -match '-Status\s+Unavailable\b'
     if ($unverifiedOnly) { $title = $null }

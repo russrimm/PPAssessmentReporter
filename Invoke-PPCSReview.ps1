@@ -93,7 +93,8 @@
 
 .PARAMETER ChecklistPath
     The framework checklist CSV (Id, Topic, Feature, Check, Verify, Target, Priority). Default PPCS-Checklist.csv
-    next to the script. When present, items that are not automated are listed as Manual and coverage is calculated.
+    next to the script (it is in the repository; rebuild it with tools\Export-Checklist.ps1). When present, items that are not automated are listed as Manual and coverage is calculated.
+    Findings that do not set their own severity take the checklist priority; without the file they default to Medium.
 
 .PARAMETER PowerPlatformApiHost
     Power Platform API host. Default api.powerplatform.com.
@@ -182,14 +183,15 @@
     Access needed (read only): a user who can see the tenant in the Power Platform admin center
     (Power Platform Administrator or equivalent). Graph checks need directory read rights
     (role assignments, Conditional Access); Dataverse checks need a role in each target environment.
-    Anything the signed-in user cannot read is reported as "Unavailable" rather than guessed.
+    Anything the signed-in user cannot read is reported as "Not verified" (status Unavailable in the CSV and JSON files) rather than guessed.
 
     Endpoint maturity: several api.powerplatform.com operations used here are preview
     (inventory, governance rule sets, advisor recommendations). The BAP tenant-settings, data-policy and
     tenant-isolation calls are best-effort fallbacks because api.powerplatform.com has no equivalent yet.
     Review api-log.csv after the first run to see which calls worked in your tenant.
 
-    Place PPCS-Checklist.csv next to this script so unautomated checklist items are listed as Manual.
+    Place PPCS-Checklist.csv next to this script so unautomated checklist items are listed as Manual. It ships in the
+    repository; tools\Export-Checklist.ps1 rebuilds it from the framework document.
 #>
 [CmdletBinding()]
 param(
@@ -814,12 +816,12 @@ function Test-TenantSettings {
             Rec = 'Set DisableConnectionSharingWithEveryone to true so makers cannot share a connection tenant-wide.' }
         @{ Id = '5.7'; Title = 'Guests cannot create Power Apps'; Path = 'powerPlatform.powerApps.enableGuestsToMake'; Want = $false; Default = $false; Sev = 'High'
             Rec = 'Keep enableGuestsToMake false unless a reviewed business case exists.' }
-        @{ Id = '3.6'; Title = 'Default environment routing enabled'; Path = 'powerPlatform.governance.enableDefaultEnvironmentRouting'; Want = $true; Default = $false; Sev = 'High'
-            Rec = 'Enable environment routing so new makers build in a personal developer environment rather than the shared default environment.' }
+        @{ Id = '3.6'; Title = 'Default environment routing enabled'; Path = 'powerPlatform.governance.enableDefaultEnvironmentRouting'; Want = $true; Default = $false; Sev = 'High'; Optional = $true
+            Rec = 'Recommended: enable environment routing so new makers build in a personal developer environment rather than the shared default environment. It is a premium governance feature that needs Managed Environments, so each customer decides.' }
         @{ Id = '4.12'; Title = 'Desktop flow data policy management enabled'; Path = 'powerPlatform.governance.policy.enableDesktopFlowDataPolicyManagement'; Want = $true; Default = $false; Sev = 'Medium'
             Rec = 'Enable desktop flow data policy management so RPA actions fall under data policies.' }
-        @{ Id = '14.3'; Title = 'Weekly admin digest enabled'; Path = 'powerPlatform.governance.disableAdminDigest'; Want = $false; Default = $false; Sev = 'Medium'
-            Rec = 'Keep the admin digest on so managed environment usage and recommendations reach admins.' }
+        @{ Id = '14.3'; Title = 'Weekly admin digest enabled'; Path = 'powerPlatform.governance.disableAdminDigest'; Want = $false; Default = $false; Sev = 'Medium'; Optional = $true
+            Rec = 'Recommended: keep the admin digest on so managed environment usage and recommendations reach admins. The digest is a Managed Environments feature, so each customer decides.' }
         @{ Id = '16.1'; Title = 'Model data sharing with Microsoft disabled'; Path = 'powerPlatform.modelExperimentation.enableModelDataSharing'; Want = $false; Default = $false; Sev = 'Medium'
             Rec = 'Leave Power Automate Copilot data sharing off unless approved by privacy and legal.' }
     )
@@ -828,7 +830,7 @@ function Test-TenantSettings {
         $explicit = ($null -ne $v)
         if (-not $explicit) { $v = $row.Default }
         $ok = ([bool]$v -eq [bool]$row.Want)
-        $st = if ($ok) { 'Pass' } else { 'Fail' }
+        $st = if ($ok) { 'Pass' } elseif ($row.Optional) { 'Info' } else { 'Fail' }
         $val = "$($row.Path) = $v" + $(if (-not $explicit) { ' (not returned; service default)' } else { '' })
         Add-Finding -Id $row.Id -Title $row.Title -Status $st -Value $val -Severity $row.Sev -Source $src -Recommendation $(if (-not $ok) { $row.Rec } else { '' })
     }
@@ -930,10 +932,13 @@ function Test-Environments {
     if ($def.Count -gt 0) {
         $d = $def[0]
         $assets = $d.Apps + $d.Flows + $d.Agents + $d.Sites
-        $st = if (-not $d.IsManaged) { 'Fail' } elseif ($assets -gt $DefaultEnvironmentAssetWarnThreshold) { 'Warning' } else { 'Pass' }
+        $st = if ($assets -gt $DefaultEnvironmentAssetWarnThreshold) { 'Warning' } elseif (-not $d.IsManaged) { 'Info' } else { 'Pass' }
         $rec = ''
-        if (-not $d.IsManaged) { $rec = 'Enable Managed Environments on the default environment, then apply sharing limits, a restrictive data policy and maker welcome content.' }
-        elseif ($assets -gt $DefaultEnvironmentAssetWarnThreshold) { $rec = 'Move business-critical apps, flows and agents out of the default environment into governed environments.' }
+        if ($assets -gt $DefaultEnvironmentAssetWarnThreshold) {
+            $rec = 'Move business-critical apps, flows and agents out of the default environment into governed environments.'
+            if (-not $d.IsManaged) { $rec += ' Managed Environments on the default environment is also recommended; each customer decides.' }
+        }
+        elseif (-not $d.IsManaged) { $rec = 'Recommended: consider Managed Environments on the default environment, then apply sharing limits, a restrictive data policy and maker welcome content. How far to roll it out is each customer''s decision.' }
         Add-Finding -Id '3.1' -Title 'Default environment hardening' -Status $st -Severity 'Critical' -Source $src -Recommendation $rec `
             -Value "Managed=$($d.IsManaged); name='$($d.Name)'; apps=$($d.Apps), flows=$($d.Flows), agents=$($d.Agents), sites=$($d.Sites) (warn above $DefaultEnvironmentAssetWarnThreshold)"
         if ($d.Name -match '\(default\)$') {
@@ -986,12 +991,12 @@ function Test-Environments {
 
     # 3.8 security groups
     $needSg = @($envs | Where-Object { $_.DataverseId -and $_.Type -in @('Production', 'Sandbox') -and -not $_.SecurityGroupId })
-    $nonSgOther = @($envs | Where-Object { $_.DataverseId -and $_.Type -in @('Trial', 'Developer') -and -not $_.SecurityGroupId })
+    $nonSgOther = @($envs | Where-Object { $_.DataverseId -and $_.Type -eq 'Trial' -and -not $_.SecurityGroupId })
     $withMgmt = @($envs | Where-Object { $_.InMgmtApi })
     if ($withMgmt.Count -gt 0) {
         $st = if ($needSg.Count -gt 0) { 'Fail' } elseif ($nonSgOther.Count -gt 0) { 'Warning' } else { 'Pass' }
         Add-Finding -Id '3.8' -Title 'Dataverse environments restricted to a security group' -Status $st -Source $src `
-            -Value "Production/sandbox without security group: $($needSg.Count); trial/developer without: $($nonSgOther.Count)" `
+            -Value "Production/sandbox without security group: $($needSg.Count); trial without: $($nonSgOther.Count) (developer environments are not counted: they are for one person, and Microsoft's security group guidance covers other environment types)" `
             -Evidence @(($needSg + $nonSgOther) | ForEach-Object { [pscustomobject]@{ Environment = $_.Name; Type = $_.Type; Id = $_.Id } }) `
             -Recommendation $(if ($st -ne 'Pass') { 'Associate an Entra security group with each Dataverse environment so only licensed, intended users can enter.' } else { '' })
     }
@@ -1300,10 +1305,21 @@ function ConvertTo-NormalizedPolicy {
         }
     }
     $envIds = @($envs | ForEach-Object { ([string](Get-Prop $_ 'name' (Get-Prop $_ 'id' $_))).ToLower() })
+    # Connector endpoint filtering (Allow/Deny URL patterns per connector) is separate from the custom connector URL patterns. It is read only when the policy data includes it.
+    $endpointCfg = @(Get-Prop $props 'connectorConfigurations.endpointConfigurations' (Get-Prop $P 'connectorConfigurations.endpointConfigurations' (Get-Prop $props 'endpointConfigurations' @())))
+    $httpRules = 0; $httpDenyAll = $false
+    foreach ($ec in $endpointCfg) {
+        if ([string](Get-Prop $ec 'connectorId' '') -notmatch '(^|/)(http|shared_http\w*|shared_webcontents|shared_webhook\w*)$') { continue }
+        foreach ($rule in @(Get-Prop $ec 'endpointRules' @())) {
+            $httpRules++
+            if ([string](Get-Prop $rule 'endpoint' '') -eq '*' -and [string](Get-Prop $rule 'behavior' '') -eq 'Deny') { $httpDenyAll = $true }
+        }
+    }
     return [pscustomobject]@{
         Name = $name; EnvironmentType = $envType; Default = $(if ($map.ContainsKey($default)) { $map[$default] } else { $default })
         EnvironmentIds = $envIds; Connectors = $connectors.ToArray()
         CustomPatterns = @(Get-Prop $props 'customConnectorUrlPatternsDefinition' (Get-Prop $P 'customConnectorUrlPatternsDefinition' @())).Count
+        HttpEndpointRules = $httpRules; HttpEndpointDenyByDefault = $httpDenyAll
     }
 }
 
@@ -1409,19 +1425,25 @@ function Test-DataPolicies {
             }
         }
         $unauth = @($table | Where-Object { $_.Connector -like 'Chat without*' })
-        $unauthBlocked = @($unauth | Where-Object { $_.Classification -eq 'Blocked' })
+        # A connector that is not listed in a policy takes the policy's default group, so a Blocked default group blocks it too.
+        $isBlocked = { param($row) $row.Classification -eq 'Blocked' -or $row.Classification -eq 'Default group (Blocked)' }
+        $unauthBlocked = @($unauth | Where-Object { & $isBlocked $_ })
         $st = if ($unauthBlocked.Count -gt 0) { 'Pass' } else { 'Fail' }
         Add-Finding -Id '4.7' -Title 'Unauthenticated agent chat connector blocked by a tenant-scoped policy' -Status $st -Severity 'Critical' -Source $src `
             -Value (($unauth | ForEach-Object { "$($_.Policy): $($_.Classification)" }) -join '; ') -Evidence @($table) `
             -Recommendation $(if ($st -eq 'Fail') { 'Block "Chat without Microsoft Entra ID authentication in Copilot Studio" in a data policy so agents must authenticate users.' } else { '' })
         $http = @($table | Where-Object { $_.Connector -eq 'HTTP' })
-        $httpBlocked = @($http | Where-Object { $_.Classification -eq 'Blocked' })
+        $httpBlocked = @($http | Where-Object { & $isBlocked $_ })
         $custom = ($policies | Measure-Object -Property CustomPatterns -Sum).Sum
-        $st = if ($httpBlocked.Count -gt 0) { 'Pass' } elseif ($custom -gt 0) { 'Warning' } else { 'Fail' }
-        $httpValue = (($http | ForEach-Object { "$($_.Policy): $($_.Classification)" }) -join '; ') + "; custom connector URL pattern rules: $custom"
+        $epRules = ($tenantScoped | Measure-Object -Property HttpEndpointRules -Sum).Sum
+        $epDenyAll = @($tenantScoped | Where-Object HttpEndpointDenyByDefault).Count
+        # Endpoint filtering rules may not be returned by the policy API, so an unblocked HTTP connector with no visible rules is a Warning to verify, not a Fail.
+        $st = if ($httpBlocked.Count -gt 0 -or $epDenyAll -gt 0) { 'Pass' } else { 'Warning' }
+        $httpValue = (($http | ForEach-Object { "$($_.Policy): $($_.Classification)" }) -join '; ') + "; HTTP endpoint filtering rules seen: $epRules ($epDenyAll tenant-scoped policy/policies end with Deny *); custom connector URL pattern rules (these apply to custom connectors, not the HTTP connector): $custom"
         Add-Finding -Id '4.6' -Title 'HTTP connector blocked or endpoint-filtered' -Status $st -Source $src `
             -Value $httpValue `
-            -Recommendation $(if ($st -ne 'Pass') { 'Block the HTTP connector or configure connector endpoint filtering so agents and flows can only reach approved endpoints.' } else { '' })
+            -Detail 'Connector endpoint filtering (Configure connector > Connector endpoints in a data policy) limits the URLs the HTTP connector can call. This script reads those rules only when the policy data includes them, so no rules seen does not prove none exist.' `
+            -Recommendation $(if ($st -ne 'Pass') { 'Block the HTTP connector or configure connector endpoint filtering that ends with Deny * so agents and flows can only reach approved endpoints. If you already filter endpoints, confirm the rules in the data policy.' } else { '' })
         Add-Finding -Id '4.8' -Title 'Copilot Studio channel, skill, trigger and telemetry connector classification' -Status Info -Source $src -Evidence @($table) `
             -Value "$($csConnectors.Count) Copilot Studio connectors evaluated across $($tenantScoped.Count) tenant-scoped polic(ies)" `
             -Recommendation 'Block channels and capabilities you do not use. Direct Line channels are allowed by default.'
@@ -1486,7 +1508,7 @@ function Test-Agents {
     Add-Finding -Id '9.1' -Title 'Authentication mode distribution' -Status Info -Source $src -Value $authDist
 
     # 9.2 channels
-    $exposed = @($view | Where-Object { $_.Channels -match 'Demo|Custom website|Direct Line|WhatsApp|Facebook|Telephony|Twilio|Slack|Telegram|Line|GroupMe' })
+    $exposed = @($view | Where-Object { $_.Channels -match 'Demo|Custom website|Direct Line|WhatsApp|Facebook|Telephony|Twilio|Slack|Telegram|\bLine\b|GroupMe' })
     $chDist = @($view | ForEach-Object { @($_.Channels -split ',\s*' | Where-Object { $_ }) } | Group-Object | Sort-Object Count -Descending | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ', '
     Add-Finding -Id '9.2' -Title 'Agents published to external or open-web channels' -Status $(if ($exposed.Count -gt 0) { 'Warning' } else { 'Pass' }) -Severity 'Critical' -Source $src `
         -Value "$($exposed.Count) agent(s) on web/external channels. Channel distribution: $chDist" -Evidence @($exposed | Select-Object Agent, Environment, Auth, Channels, LastPublished) `
@@ -1643,7 +1665,7 @@ function Test-AppsFlowsSites {
             -Value "$($inDefault.Count) of $($flows.Count) flows are in the default environment" -Recommendation 'Move business-critical flows to solution-aware production environments with service identities.'
         $trig = ($flows | Group-Object { Get-Prop $_ 'properties.trigger' '(built-in/manual/schedule)' } | Sort-Object Count -Descending | Select-Object -First 8 | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ', '
         Add-Finding -Id '8.2' -Title 'Flow trigger distribution (connector-based triggers only)' -Status Info -Source $src -Value $trig `
-            -Recommendation 'The inventory does not expose HTTP request triggers. Review flows with "When an HTTP request is received" manually.'
+            -Recommendation 'The inventory does not expose HTTP request triggers. The finding Flows started by an HTTP request trigger covers them when the Dataverse flow definition scan runs; otherwise review flows with "When an HTTP request is received" manually.'
     }
 
     # sites
@@ -1777,7 +1799,7 @@ function Test-Dataverse {
     $targets = @(Get-DataverseTargets $EnvMap)
     if ($targets.Count -eq 0) { return }
     $admins = New-Object System.Collections.ArrayList; $audit = New-Object System.Collections.ArrayList
-    $tx = New-Object System.Collections.ArrayList; $sol = New-Object System.Collections.ArrayList; $blocked = 0
+    $tx = New-Object System.Collections.ArrayList; $sol = New-Object System.Collections.ArrayList; $blocked = 0; $adminRead = 0
     foreach ($e in $targets) {
         $base = $e.Url.TrimEnd('/')
         $h = @{ 'OData-MaxVersion' = '4.0'; 'OData-Version' = '4.0' }
@@ -1792,6 +1814,7 @@ function Test-Dataverse {
         Add-EnvFact $e.Id 'DvAudit' ([bool](Get-Prop $org 'isauditenabled' $false))
         $r = Invoke-Api -Name "Dataverse: System Administrators ($($e.Name))" -Uri "$base/api/data/v9.2/roles?`$select=name&`$filter=name eq 'System Administrator'&`$expand=systemuserroles_association(`$select=fullname,domainname,isdisabled,accessmode,applicationid)" -Resource $base -ExtraHeaders $h
         if ($r.Ok) {
+            $adminRead++
             $seen = @{}
             foreach ($role in @(Get-Prop $r.Data 'value' @())) {
                 foreach ($u in @(Get-Prop $role 'systemuserroles_association' @())) {
@@ -1820,14 +1843,16 @@ function Test-Dataverse {
     $offAudit = @($audit | Where-Object { -not $_.AuditEnabled })
     Add-Finding -Id '6.4' -Title 'Dataverse auditing enabled' -Status $(if ($offAudit.Count -gt 0) { 'Fail' } else { 'Pass' }) -Source $src -Value "Disabled in $($offAudit.Count) of $($audit.Count) environments ($note)" -Evidence @($audit) `
         -Recommendation $(if ($offAudit.Count -gt 0) { 'Turn on auditing and define retention (environment Settings > Audit settings).' } else { '' })
-    if ($admins.Count -gt 0 -or $audit.Count -gt 0) {
+    if ($adminRead -gt 0) {
         $perEnv = $admins | Group-Object Environment
         $worst = if ($perEnv) { ($perEnv | Measure-Object Count -Maximum).Maximum } else { 0 }
         $st = if ($worst -gt 10) { 'Fail' } elseif ($worst -gt 5) { 'Warning' } else { 'Pass' }
         Add-Finding -Id '6.1' -Title 'Interactive System Administrators per environment' -Status $st -Severity 'Critical' -Source $src `
-            -Value "Highest count: $worst (warn above 5, fail above 10); $note" -Evidence @($admins | Select-Object -First $EvidenceRowLimit) `
-            -Recommendation $(if ($st -ne 'Pass') { 'Replace System Administrator with least-privilege custom roles; the PPAC security recommendation fires above 10 admins.' } else { '' })
+            -Value "Highest count: $worst (warn above 5, fail above 10); System Administrators read in $adminRead of $($audit.Count) accessible environment(s); $note" -Evidence @($admins | Select-Object -First $EvidenceRowLimit) `
+            -Detail 'The Power Platform admin center administrator privileges recommendation (managed environments, preview) currently lists environments with more than 20 System Administrators. The thresholds here are stricter and are this script''s own.' `
+            -Recommendation $(if ($st -ne 'Pass') { 'Replace System Administrator with least-privilege custom roles and review who holds the role in each environment listed in the evidence.' } else { '' })
     }
+    else { Add-Finding -Id '6.1' -Title 'Interactive System Administrators per environment' -Status Unavailable -Severity 'Critical' -Source $src -Detail "The System Administrator role members could not be read in any of the $($audit.Count) accessible environment(s). Needs a Dataverse role that can read security roles and users." }
     if ($tx.Count -gt 0) {
         $old = @($tx | Where-Object { $_.OldestAgeDays -gt 365 })
         Add-Finding -Id '6.5' -Title 'Conversation transcript retention' -Status $(if ($old.Count -gt 0) { 'Warning' } else { 'Info' }) -Severity 'Critical' -Source $src `
@@ -2578,7 +2603,10 @@ function Test-DeepFlows {
             if (-not $cd) { continue }
             if ($cd -match '"kind"\s*:\s*"Http"') {
                 $am = [regex]::Match($cd, '"triggerAuthenticationType"\s*:\s*"(\w+)"')
-                [void]$httpTrig.Add([pscustomobject]@{ Flow = $name; Environment = $e.Name; WhoCanTrigger = $(if ($am.Success) { $am.Groups[1].Value } else { 'not stated in definition' }) })
+                $setting = if ($am.Success) { $am.Groups[1].Value } else { '' }
+                $who = switch -Regex ($setting) { '^$' { 'Not stated in the definition' } '^(All|Anonymous|Anyone)$' { 'Anyone' } '^Tenant$' { 'Any user in my tenant' } default { $setting } }
+                $flowState = switch ([string](Get-Prop $f 'statecode' '')) { '0' { 'Off' } '1' { 'On' } '2' { 'Suspended' } default { '' } }
+                [void]$httpTrig.Add([pscustomobject]@{ Flow = $name; Environment = $e.Name; State = $flowState; WhoCanTrigger = $who; Setting = $setting })
             }
             if ($cd -match $SecretJson) { [void]$secrets.Add([pscustomobject]@{ Flow = $name; Environment = $e.Name }) }
             $hosts = @{}
@@ -2594,10 +2622,15 @@ function Test-DeepFlows {
         return
     }
     $note = "$total flow(s) scanned in $scanned environment(s) (cap $MaxFlowDefinitionsPerEnvironment per environment)" + $(if ($failed -gt 0) { "; $failed not readable" } else { '' })
-    $open = @($httpTrig | Where-Object { $_.WhoCanTrigger -match '^(All|Anonymous|Anyone)$' })
-    $st = if ($open.Count -gt 0) { 'Fail' } elseif ($httpTrig.Count -gt 0) { 'Warning' } else { 'Pass' }
-    Add-Finding -Id '8.2' -Title 'Flows started by an HTTP request trigger' -Status $st -Severity 'Critical' -Source $src -Value "$($httpTrig.Count) flow(s) with an HTTP request trigger; $($open.Count) callable by anyone; $note" -Evidence $httpTrig.ToArray() `
-        -Recommendation $(if ($st -ne 'Pass') { 'Restrict who can trigger each flow (specific users in the tenant), validate input and treat the URL as a secret; review any set to Anyone first.' } else { '' })
+    $open = @($httpTrig | Where-Object { $_.Setting -match '^(All|Anonymous|Anyone)$' })
+    $restricted = @($httpTrig | Where-Object { $_.Setting -match '^(Tenant|Specific)$' })
+    $unconfirmed = @($httpTrig | Where-Object { $_.Setting -notmatch '^(All|Anonymous|Anyone|Tenant|Specific)$' })
+    $st = if ($open.Count -gt 0) { 'Fail' } elseif ($unconfirmed.Count -gt 0) { 'Warning' } else { 'Pass' }
+    $httpSorted = @($httpTrig | Sort-Object @{ Expression = { switch -Regex ($_.Setting) { '^(All|Anonymous|Anyone)$' { 0 } '^(Tenant|Specific)$' { 2 } default { 1 } } } }, Environment, Flow)
+    Add-Finding -Id '8.2' -Title 'Flows started by an HTTP request trigger' -Status $st -Severity 'Critical' -Source $src `
+        -Value "$($httpTrig.Count) flow(s) with an HTTP request trigger: $($open.Count) set to Anyone, $($unconfirmed.Count) with no recognized setting (verify in the designer), $($restricted.Count) restricted to signed-in tenant users; $note" -Evidence $httpSorted `
+        -Detail 'The setting Who can trigger the flow? is stored as triggerAuthenticationType in the flow definition (All is Anyone, Tenant is Any user in my tenant). Microsoft documents Anyone as the legacy setting: anyone who has the URL can call the flow. When the setting is missing from a definition this script cannot confirm what the designer shows, so those flows are listed to verify rather than counted as open or restricted. Flows that are Off cannot be triggered; the State column shows which flows are on.' `
+        -Recommendation $(if ($st -ne 'Pass') { 'Set Who can trigger the flow? to Any user in my tenant or Specific users in my tenant on each flow, validate the input and treat the URL as a secret; review flows set to Anyone first.' } else { '' })
     Add-Finding -Id '8.3' -Title 'Possible hard-coded secrets in flow definitions (heuristic)' -Status $(if ($secrets.Count -gt 0) { 'Fail' } else { 'Pass' }) -Severity 'Critical' -Source $src -Confidence Heuristic -Value "$($secrets.Count) flow(s); values are not recorded" -Evidence $secrets.ToArray() `
         -Recommendation $(if ($secrets.Count -gt 0) { 'Move secrets to Key Vault-backed environment variables or managed identity and rotate exposed values.' } else { '' })
     Add-Finding -Id '8.6' -Title 'Flows calling external (non-Microsoft) hosts' -Status $(if ($ext.Count -gt 0) { 'Warning' } else { 'Pass' }) -Severity 'High' -Source $src -Confidence Heuristic -Value "$($ext.Count) flow(s) with a URI to a non-Microsoft host" -Evidence @($ext | Select-Object -First $EvidenceRowLimit) `
@@ -2748,7 +2781,7 @@ function Test-ShadowEnvironments {
     $nonDev = @($byUser | Where-Object { $_.Type -notin @('Developer') })
     $subject = @(if ($haveAdmins) { $nonAdmin } else { $nonDev })
     $st = if ($subject.Count -gt 0) { 'Warning' } else { 'Pass' }
-    $basis = if ($haveAdmins) { 'created by a user who does not hold Global, Power Platform or Dynamics 365 Administrator' } else { 'created by a user (admin roles not read; run without -SkipEntra to filter admins)' }
+    $basis = if ($haveAdmins) { 'created by a user who does not currently hold an active Global, Power Platform or Dynamics 365 Administrator assignment (an admin who is only PIM-eligible and has not activated the role is listed too)' } else { 'created by a user (admin roles not read; run without -SkipEntra to filter admins)' }
     Add-Finding -Id '2.4' -Title 'Environments created by non-admins in the last 90 days' -Status $st -Severity 'High' -Source $src `
         -Value "$($subject.Count) environment(s) $basis; $($recent.Count) environment(s) created in the last 90 days in total" `
         -Evidence @($subject | Select-Object Name, Type, CreatedAt, CreatedById, IsManaged | Select-Object -First $EvidenceRowLimit) `
@@ -2920,7 +2953,7 @@ function Get-AgentRiskRegister {
     foreach ($d in @($script:DeepAgentRows)) { $deep[([string]$d.AgentId).ToLower()] = $d }
     $orphan = @{}
     foreach ($o in @($script:OrphanedAssets)) { if ($o.Kind -eq 'Agent' -and $o.Id) { $orphan[([string]$o.Id).ToLower()] = $true } }
-    $openChannel = 'Demo|Custom website|Direct Line|WhatsApp|Facebook|Telephony|Twilio|Slack|Telegram|Line|GroupMe'
+    $openChannel = 'Demo|Custom website|Direct Line|WhatsApp|Facebook|Telephony|Twilio|Slack|Telegram|\bLine\b|GroupMe'
     $rows = foreach ($a in $view) {
         $id = ([string]$a.Id).ToLower()
         $d = $deep[$id]
@@ -3001,7 +3034,7 @@ function Get-EnvironmentProfile {
             }
         }
         if ($e.DataverseId -and -not $e.SecurityGroupId) {
-            if ($e.Type -in @('Production', 'Sandbox')) { AddFlag 12 'No security group restricts access' } elseif ($e.Type -in @('Trial', 'Developer')) { AddFlag 3 'No security group' }
+            if ($e.Type -in @('Production', 'Sandbox')) { AddFlag 12 'No security group restricts access' } elseif ($e.Type -eq 'Trial') { AddFlag 3 'No security group' }
         }
         if ($null -ne $facts -and $facts.ContainsKey('ConvAudit') -and $null -ne $facts['ConvAudit'] -and -not [bool]$facts['ConvAudit']) { AddFlag 10 'Conversation audit logging is off' }
         if ($null -ne $facts -and $facts.ContainsKey('DvAudit') -and -not [bool]$facts['DvAudit']) { AddFlag $(if ($isProd) { 15 } else { 6 }) 'Dataverse auditing is off' }
@@ -3657,7 +3690,7 @@ $Learn = @{
     DLP            = @('Data policies', 'power-platform/admin/wp-data-loss-prevention')
     DlpStrategy    = @('Implement a data policy strategy', 'power-platform/guidance/adoption/dlp-strategy')
     ConnClass      = @('Connector classification', 'power-platform/admin/dlp-connector-classification')
-    CustomConn     = @('Custom connector parity', 'power-platform/admin/dlp-custom-connector-parity')
+    CustomConn     = @('Data policies for custom connectors', 'power-platform/admin/dlp-custom-connector-parity')
     EndpointFilter = @('Connector endpoint filtering', 'power-platform/admin/connector-endpoint-filtering')
     SecOverview    = @('Power Platform security overview', 'power-platform/admin/security/security-overview')
     SecRoles       = @('Security roles for Dataverse', 'power-platform/admin/database-security')
@@ -3667,7 +3700,7 @@ $Learn = @{
     VNet           = @('Azure Virtual Network support', 'power-platform/admin/vnet-support-overview')
     Backup         = @('Back up and restore environments', 'power-platform/admin/backup-restore-environments')
     Capacity       = @('Dataverse capacity-based storage', 'power-platform/admin/capacity-storage')
-    Regions        = @('Regions overview', 'power-platform/admin/regions-overview')
+    Regions        = @('Choose the region when setting up an environment', 'power-platform/admin/regions-overview')
     DataShare      = @('FAQ: optional data sharing for Copilot AI features', 'power-platform/faqs-copilot-data-sharing')
     CopilotRegions = @('Move data across regions for Copilots and AI agents', 'power-platform/admin/geographical-availability-copilot')
     ALM            = @('Solution concepts for ALM', 'power-platform/alm/solution-concepts-alm')
@@ -4377,7 +4410,7 @@ function Get-HtmlManual {
     $items = @($M.Manual)
     [void]$sb.Append("<section class='panel' id='manual'><h2>Checklist items needing manual review ($($items.Count))</h2>")
     if (@($M.Coverage).Count -eq 0) {
-        [void]$sb.Append("<p class='lead'>The checklist file was not found ($(Format-Html $ChecklistPath)). Place PPCS-Checklist.csv next to the script to list the items that automation cannot cover.</p></section>")
+        [void]$sb.Append("<p class='lead'>The checklist file was not found ($(Format-Html $ChecklistPath)), so the framework items that automation cannot cover are not listed here and findings without their own severity default to Medium. Get PPCS-Checklist.csv from the repository (or rebuild it with tools\Export-Checklist.ps1), keep it next to the script, and run again.</p></section>")
         return $sb.ToString()
     }
     [void]$sb.Append("<p class='lead'>These checklist items have no automated test, or the test could not run. Nothing is silently skipped: review each one with the customer, using the how-to-verify guidance.</p>")
@@ -4454,7 +4487,10 @@ function Invoke-Review {
         foreach ($row in (Import-Csv -Path $ChecklistPath)) { $script:Checklist[$row.Id] = $row }
         Write-Host "Loaded $($script:Checklist.Count) checklist items from $ChecklistPath"
     }
-    else { Write-Warning "Checklist file not found at $ChecklistPath. Manual items will not be listed." }
+    else {
+        Write-Warning "Checklist file not found at $ChecklistPath. The report will not list manual checks or coverage, and findings without their own severity default to Medium. Get PPCS-Checklist.csv from the repository (or rebuild it with tools\Export-Checklist.ps1) and keep it next to the script."
+        Add-Limitation 'Checklist' "PPCS-Checklist.csv was not found, so manual checks and coverage are not listed and findings without their own severity default to Medium. Severity counts, the roadmap and Fix these first can differ from a run that has the checklist."
+    }
 
     Write-Host 'Signing in...' -ForegroundColor Cyan
     Initialize-Auth

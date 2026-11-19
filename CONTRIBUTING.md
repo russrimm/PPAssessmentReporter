@@ -6,7 +6,8 @@ This is a personal project, but changes are welcome as issues or pull requests. 
 
 - **Read-only.** A check must never create, change or delete anything in a tenant. Use a POST only when a read endpoint requires it.
 - **Honest results.** If the data cannot be read, report Not verified (`Add-Unavailable`). Never report Pass for something you could not see.
-- **Optional features are not gaps.** When a feature is each customer's decision (Managed Environments, IP firewall, cookie binding, sharing limits and similar), report Pass or Info with a "Recommended:" action. Reserve Fail and Warning for controls whose absence is a risk on its own.
+- **Optional features are not gaps.** When a feature is each customer's decision (Managed Environments, default environment routing, the admin digest, IP firewall, cookie binding, sharing limits and similar), report Pass or Info with a "Recommended:" action. Reserve Fail and Warning for controls whose absence is a risk on its own.
+- **Say what you could not confirm.** If a setting might exist but the API data does not show it (for example HTTP endpoint filtering rules, or a missing flow trigger setting), report Warning or Info and say so. Never present "not seen" as "does not exist".
 - **US English** in all text.
 
 ## Script encoding
@@ -18,10 +19,12 @@ This is a personal project, but changes are welcome as issues or pull requests. 
 1. **Write the check** in a function and call it from `Invoke-Review` through the existing step wrapper, so one failure cannot stop the run. Raise findings with `Add-Finding` (or `Add-Unavailable` when a call failed). Give each one the framework ID, a short title, status, severity, confidence, value, detail, and a `-Recommendation` when there is something to do.
 2. **Add a Why rule** to `$WhyRules` in `Get-WhyText`. Rules are first match wins, so put a title-specific rule before the generic rule for the same ID.
 3. **Add a Learn rule** to `$LearnRules` in `Get-LearnLinks`, with the same ordering rule. Use real `learn.microsoft.com` pages and confirm each URL returns HTTP 200.
-4. **Update the README**: add a row to the check reference under the right area (ID, check, how it is rated, Do and Why, Learn links). Keep the Why and Learn text identical to the script.
+4. **Update the README**: add an entry to the check reference under the right area (a bullet that starts with the ID, then the check title, how it is rated, Do and Why, Learn links). Keep the Why and Learn text identical to the script.
 5. **Update `CHANGELOG.md`** and bump `$ScriptVersion` for a user-visible change.
 
 ## Checks to run before a pull request
+
+These also run in CI (`.github/workflows/validate.yml`) on every push and pull request.
 
 ```powershell
 # 1. Parse on both PowerShell editions
@@ -34,9 +37,16 @@ Invoke-ScriptAnalyzer -Path .\Invoke-PPCSReview.ps1 -Severity Error, Warning
 
 # 3. Every finding in the script appears in the README reference
 .\tools\Test-ReadmeCoverage.ps1
+
+# 4. The checklist is present, matches the framework document and covers every check ID the script reports
+.\tools\Test-Checklist.ps1
 ```
 
 New functions should use singular nouns and avoid unused parameters so the lint warning count does not grow.
+
+## The checklist file
+
+`PPCS-Checklist.csv` is generated from the framework document (`PowerPlatform_CopilotStudio_Security_Review_v2.docx`), which is the source of truth. Do not edit the CSV by hand. Change the document, run `.\tools\Export-Checklist.ps1`, and commit both. The tool is ASCII and US English only, writes UTF-8 with a byte order mark and CRLF, and `.gitattributes` stops Git from rewriting the file. If you add a check with a new ID, the ID must exist in the document's checklist, or `tools\Test-Checklist.ps1` fails. The framework document's summary table currently disagrees with its own item table for area 18 (the export prints a warning and uses the item table); fix that in the document.
 
 ## Testing
 

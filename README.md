@@ -91,7 +91,7 @@ Version 2.1.0 (see [CHANGELOG.md](CHANGELOG.md)):
 
 ## Quick start
 
-Requirements: PowerShell 7 or later (recommended; Windows PowerShell 5.1 works but can fail on large inventory responses) and a signed-in user with the access described below. The default sign-in needs no modules.
+Requirements: PowerShell 7 or later (recommended; Windows PowerShell 5.1 works but can fail on large inventory responses) and a signed-in user with the access described below. The default sign-in needs no modules. Keep `PPCS-Checklist.csv` next to the script: clone the repository or download both files. Without the checklist the script still runs, but it warns and the report loses its manual-checks list and coverage, and findings that set no severity of their own default to Medium.
 
 ```powershell
 # Interactive sign-in with a device code, open the report when done
@@ -137,7 +137,7 @@ Optional components: `Az.Accounts` for `-AuthMethod Az`, and `Microsoft.PowerApp
 | `-ClientId` | `1950a258-227b-4e31-a9cf-717495945fc2` | Public client for device code sign-in. |
 | `-AccessToken` | none | Bearer token for `https://api.powerplatform.com` with `-AuthMethod Token`. If omitted, the `PPCS_ACCESS_TOKEN` environment variable is used. |
 | `-OutputPath` | `.\PPCS-Review-<timestamp>` | Folder for the report and exports. |
-| `-ChecklistPath` | `PPCS-Checklist.csv` next to the script | Framework checklist. When present, items that are not automated are listed as manual checks and coverage is calculated. |
+| `-ChecklistPath` | `PPCS-Checklist.csv` next to the script | Framework checklist, included in the repository. When present, items that are not automated are listed as manual checks, coverage is calculated and each finding without its own severity takes the checklist priority. Without it, those findings default to Medium severity. |
 | `-PowerPlatformApiHost`, `-BapApiHost`, `-GraphHost`, `-BapResource` | `api.powerplatform.com`, `api.bap.microsoft.com`, `graph.microsoft.com`, `https://service.powerapps.com` | Endpoint overrides, for example for sovereign clouds (not tested). |
 | `-SkipLegacyApis` | off | Skip everything read from `api.bap.microsoft.com`: tenant settings, tenant isolation, data policies and Managed Environment settings. |
 | `-SkipEntra` | off | Skip Microsoft Graph checks: admin roles, PIM, Conditional Access and owner lookup. |
@@ -194,7 +194,7 @@ The navigation bar jumps between Summary, Start here, Roadmap, Scorecard, Usage,
 - **Score** is points divided by twice the number of scored checks, where Pass is 2, Warning is 1 and Fail is 0. Info and Not verified are not scored. Bands: below 40 At risk, 40 to 69 Developing, 70 to 89 Established, 90 and above Leading.
 - **Critical gaps** are Fail results with Critical severity. An area or the overall result is held at Developing while it has a Critical gap.
 - **Not rated and Provisional.** Fewer than 10 scored checks means no band is shown. If 25% or more of the checks could not be verified, the rating is marked Provisional.
-- **Optional features are never gaps.** Features that each customer decides on (Managed Environments coverage, IP firewall, cookie binding, content security policy, session timeouts, sharing limits and solution checker enforcement) are reported as Pass when adopted or Info with a "Recommended" action when not.
+- **Optional features are never gaps.** Features that each customer decides on (Managed Environments coverage and management of the default environment, environment routing, the admin digest, IP firewall, cookie binding, content security policy, session timeouts, sharing limits and solution checker enforcement) are reported as Pass when adopted or Info with a "Recommended" action when not.
 
 ### Fix these first, roadmap and Start here
 
@@ -276,7 +276,7 @@ Every automated finding is listed below, grouped like the report: six sections a
   - **Why:** Uncontrolled environment creation produces sprawl outside data policies, ownership and monitoring.
   - **Learn:** [Control who can create and manage environments](https://learn.microsoft.com/en-us/power-platform/admin/control-environment-creation); [Tenant settings](https://learn.microsoft.com/en-us/power-platform/admin/tenant-settings); [Develop a tenant environment strategy](https://learn.microsoft.com/en-us/power-platform/guidance/adoption/environment-strategy)
 - **2.4** **Environments created by non-admins in the last 90 days**
-  - **Rated:** High. Warning when an environment (other than the default) created in the last 90 days was created by a user who is not a Global, Power Platform or Dynamics 365 administrator; otherwise Pass.
+  - **Rated:** High. Warning when an environment (other than the default) created in the last 90 days was created by a user who does not currently hold an active Global, Power Platform or Dynamics 365 Administrator assignment (an admin who is only PIM-eligible and has not activated the role is listed too); otherwise Pass.
   - **Do:** Restrict environment creation to admins and route new environments through your request process; investigate how these were created.
   - **Why:** Uncontrolled environment creation produces sprawl outside data policies, ownership and monitoring.
   - **Learn:** [Control who can create and manage environments](https://learn.microsoft.com/en-us/power-platform/admin/control-environment-creation); [Tenant settings](https://learn.microsoft.com/en-us/power-platform/admin/tenant-settings); [Develop a tenant environment strategy](https://learn.microsoft.com/en-us/power-platform/guidance/adoption/environment-strategy)
@@ -301,8 +301,8 @@ Every automated finding is listed below, grouped like the report: six sections a
 *Why this area matters:* Environments are the security, data and lifecycle boundary for Power Platform and Copilot Studio. Weak separation means weak controls everywhere else.
 
 - **3.1** **Default environment hardening**
-  - **Rated:** Critical. Fail when the default environment is not managed; Warning when it is managed but holds more than 25 apps, flows, agents and sites (`-DefaultEnvironmentAssetWarnThreshold`); otherwise Pass.
-  - **Do:** Enable Managed Environments on the default environment, then apply sharing limits, a restrictive data policy and maker welcome content. If it is already managed, move business-critical apps, flows and agents out of the default environment into governed environments.
+  - **Rated:** Critical. Warning when the default environment holds more than 25 apps, flows, agents and sites (`-DefaultEnvironmentAssetWarnThreshold`); Info (recommended, never a gap) when it holds fewer but is not a managed environment; otherwise Pass.
+  - **Do:** Move business-critical apps, flows and agents out of the default environment into governed environments. If it is not managed, also consider Managed Environments on it: add sharing limits, a restrictive data policy and maker welcome content. Each customer decides how far to roll Managed Environments out.
   - **Why:** Every licensed user can build in the default environment, so unless it is hardened it becomes where shadow apps and data pile up.
   - **Learn:** [Secure the default environment](https://learn.microsoft.com/en-us/power-platform/guidance/adoption/secure-default-environment); [Develop a tenant environment strategy](https://learn.microsoft.com/en-us/power-platform/guidance/adoption/environment-strategy); [Environment routing](https://learn.microsoft.com/en-us/power-platform/admin/default-environment-routing)
 - **3.1** **Default environment renamed to state its purpose**
@@ -330,8 +330,8 @@ Every automated finding is listed below, grouped like the report: six sections a
   - **Why:** Microsoft documents a deprecation for unmanaged developer environments, so ones you want to keep need a plan before the deadline.
   - **Learn:** [Managed Environments overview](https://learn.microsoft.com/en-us/power-platform/admin/managed-environment-overview); [Enable Managed Environments](https://learn.microsoft.com/en-us/power-platform/admin/managed-environment-enable); [Develop a tenant environment strategy](https://learn.microsoft.com/en-us/power-platform/guidance/adoption/environment-strategy)
 - **3.6** **Default environment routing enabled**
-  - **Rated:** High. Pass when `powerPlatform.governance.enableDefaultEnvironmentRouting` is true, otherwise Fail.
-  - **Do:** Enable environment routing so new makers build in a personal developer environment rather than the shared default environment.
+  - **Rated:** High. Pass when `powerPlatform.governance.enableDefaultEnvironmentRouting` is true, otherwise Info (recommended, never a gap): environment routing is a premium governance feature that needs Managed Environments.
+  - **Do (optional):** enable environment routing so new makers build in a personal developer environment rather than the shared default environment.
   - **Why:** Environment routing sends new makers to their own governed developer environments instead of the shared default environment.
   - **Learn:** [Environment routing](https://learn.microsoft.com/en-us/power-platform/admin/default-environment-routing); [Secure the default environment](https://learn.microsoft.com/en-us/power-platform/guidance/adoption/secure-default-environment)
 - **3.7** **Environment groups**
@@ -344,7 +344,7 @@ Every automated finding is listed below, grouped like the report: six sections a
   - **Do:** No action; informational.
   - **Learn:** [Environment groups](https://learn.microsoft.com/en-us/power-platform/admin/environment-groups); [Rules for environment groups](https://learn.microsoft.com/en-us/power-platform/admin/environment-groups-rules)
 - **3.8** **Dataverse environments restricted to a security group**
-  - **Rated:** Fail when a production or sandbox Dataverse environment has no security group; Warning when only trial or developer environments lack one; otherwise Pass.
+  - **Rated:** Fail when a production or sandbox Dataverse environment has no security group; Warning when only a trial environment lacks one; otherwise Pass. Developer environments are not counted: they are for one person, and Microsoft's security group guidance covers other environment types.
   - **Do:** Associate an Entra security group with each Dataverse environment so only licensed, intended users can enter.
   - **Why:** A security group limits who can enter a Dataverse environment, so access is intentional rather than tenant-wide.
   - **Learn:** [Power Platform environments overview](https://learn.microsoft.com/en-us/power-platform/admin/environments-overview); [Control who can create and manage environments](https://learn.microsoft.com/en-us/power-platform/admin/control-environment-creation); [Develop a tenant environment strategy](https://learn.microsoft.com/en-us/power-platform/guidance/adoption/environment-strategy)
@@ -395,17 +395,17 @@ Every automated finding is listed below, grouped like the report: six sections a
   - **Why:** Data policies stop business data from flowing to consumer or untrusted services, and a tenant baseline covers new environments automatically.
   - **Learn:** [Data policies](https://learn.microsoft.com/en-us/power-platform/admin/wp-data-loss-prevention); [Implement a data policy strategy](https://learn.microsoft.com/en-us/power-platform/guidance/adoption/dlp-strategy); [Connector classification](https://learn.microsoft.com/en-us/power-platform/admin/dlp-connector-classification)
 - **4.6** **HTTP connector blocked or endpoint-filtered**
-  - **Rated:** Pass when the HTTP connector is Blocked in a tenant-scoped policy; Warning when it is not blocked but custom connector URL pattern (endpoint filtering) rules exist; otherwise Fail.
-  - **Do:** Block the HTTP connector or configure connector endpoint filtering so agents and flows can only reach approved endpoints.
+  - **Rated:** Pass when the HTTP connector is Blocked in a tenant-scoped policy (explicitly, or because the policy's default group is Blocked and the connector is not listed), or when a tenant-scoped policy has HTTP endpoint filtering rules that end with Deny `*`; otherwise Warning. HTTP endpoint filtering rules are read only when the policy data includes them, so the Warning says to confirm in the policy rather than claiming no rules exist. Custom connector URL pattern rules are reported separately because they apply to custom connectors, not to the HTTP connector.
+  - **Do:** Block the HTTP connector or configure connector endpoint filtering that ends with Deny * so agents and flows can only reach approved endpoints. If you already filter endpoints, confirm the rules in the data policy.
   - **Why:** The HTTP connector can send data to any endpoint, so block it or limit it to approved endpoints.
   - **Learn:** [Connector endpoint filtering](https://learn.microsoft.com/en-us/power-platform/admin/connector-endpoint-filtering); [Data policies](https://learn.microsoft.com/en-us/power-platform/admin/wp-data-loss-prevention); [Connector classification](https://learn.microsoft.com/en-us/power-platform/admin/dlp-connector-classification)
 - **4.6** **Apps/flows using non-Microsoft or custom connectors**
   - **Rated:** Info when apps or flows use connectors published by someone other than Microsoft (includes custom connectors); otherwise Pass.
   - **Do:** Review custom connectors for authentication, ownership and endpoint restrictions.
   - **Why:** Custom and third-party connectors reach outside Microsoft services and need review for authentication and ownership.
-  - **Learn:** [Custom connector parity](https://learn.microsoft.com/en-us/power-platform/admin/dlp-custom-connector-parity); [Connector classification](https://learn.microsoft.com/en-us/power-platform/admin/dlp-connector-classification); [Data policies](https://learn.microsoft.com/en-us/power-platform/admin/wp-data-loss-prevention)
+  - **Learn:** [Data policies for custom connectors](https://learn.microsoft.com/en-us/power-platform/admin/dlp-custom-connector-parity); [Connector classification](https://learn.microsoft.com/en-us/power-platform/admin/dlp-connector-classification); [Data policies](https://learn.microsoft.com/en-us/power-platform/admin/wp-data-loss-prevention)
 - **4.7** **Unauthenticated agent chat connector blocked by a tenant-scoped policy**
-  - **Rated:** Critical. Pass when "Chat without Microsoft Entra ID authentication in Copilot Studio" is Blocked in a tenant-scoped policy; otherwise Fail.
+  - **Rated:** Critical. Pass when "Chat without Microsoft Entra ID authentication in Copilot Studio" is Blocked in a tenant-scoped policy (explicitly, or because the policy's default group is Blocked and the connector is not listed); otherwise Fail.
   - **Do:** Block "Chat without Microsoft Entra ID authentication in Copilot Studio" in a data policy so agents must authenticate users.
   - **Why:** The unauthenticated chat connector lets agents answer anyone who finds them, and blocking it enforces sign-in tenant-wide.
   - **Learn:** [Configure data policies for agents](https://learn.microsoft.com/en-us/microsoft-copilot-studio/admin-data-loss-prevention); [Connector classification](https://learn.microsoft.com/en-us/power-platform/admin/dlp-connector-classification); [Data policies](https://learn.microsoft.com/en-us/power-platform/admin/wp-data-loss-prevention)
@@ -455,7 +455,7 @@ Every automated finding is listed below, grouped like the report: six sections a
   - **Why:** Guest users can reach business data, so each one should be intentional and reviewed.
   - **Learn:** [Power Platform security overview](https://learn.microsoft.com/en-us/power-platform/admin/security/security-overview); [Security roles for Dataverse](https://learn.microsoft.com/en-us/power-platform/admin/database-security)
 - **5.8** **Orphaned `<apps, flows, agents or assets>` (owner deleted or disabled)**
-  - **Rated:** Fail when an owner is a deleted or disabled account (looked up in Microsoft Entra ID); otherwise Pass. One root cause is reported in four findings (5.8 for all assets, 7.4 apps, 8.1 flows, 9.9 agents) and counted once in "Fix these first".
+  - **Rated:** Fail when an owner is a deleted or disabled account (looked up in Microsoft Entra ID); otherwise Pass. One root cause is reported in four findings (5.8 for all assets, 7.4 apps, 8.1 flows, 9.9 agents) and counted once in "Fix these first". The flow finding (8.1) shows this Why instead: Flows owned by deleted or disabled accounts can fail or keep running with no one accountable.
   - **Do:** Reassign ownership (PPAC, Reassign Copilot Agent API, or admin cmdlets) and add a leaver step to offboarding.
   - **Why:** Assets owned by deleted or disabled people have no one accountable and often keep running with stale connections.
   - **Learn:** [Power Platform inventory](https://learn.microsoft.com/en-us/power-platform/admin/power-platform-inventory); [Power Platform inventory API](https://learn.microsoft.com/en-us/power-platform/admin/inventory-api); [Quarantine agents with the Power Platform API](https://learn.microsoft.com/en-us/microsoft-copilot-studio/admin-api-quarantine)
@@ -465,8 +465,8 @@ Every automated finding is listed below, grouped like the report: six sections a
 *Why this area matters:* Dataverse holds business data and, for Copilot Studio, agent definitions and conversation transcripts. Its security roles and environment controls decide who can read or change them.
 
 - **6.1** **Interactive System Administrators per environment**
-  - **Rated:** Critical. Fail above 10 interactive System Administrators in any scanned environment, Warning above 5, otherwise Pass. The PPAC security recommendation fires above 10.
-  - **Do:** Replace System Administrator with least-privilege custom roles; the PPAC security recommendation fires above 10 admins.
+  - **Rated:** Critical. Fail above 10 interactive System Administrators in any scanned environment, Warning above 5, otherwise Pass. Not verified when the role members cannot be read in any accessible environment. These thresholds are this script's own; the Power Platform admin center administrator privileges recommendation (managed environments, preview) currently lists environments with more than 20.
+  - **Do:** Replace System Administrator with least-privilege custom roles and review who holds the role in each environment listed in the evidence.
   - **Why:** Many System Administrators means many people who can read all data and change security, so least privilege reduces risk.
   - **Learn:** [Security roles for Dataverse](https://learn.microsoft.com/en-us/power-platform/admin/database-security); [Power Platform security overview](https://learn.microsoft.com/en-us/power-platform/admin/security/security-overview)
 - **6.4** **Dataverse auditing enabled**
@@ -601,12 +601,12 @@ Every automated finding is listed below, grouped like the report: six sections a
   - **Learn:** [Rules for environment groups](https://learn.microsoft.com/en-us/power-platform/admin/environment-groups-rules); [Environment groups](https://learn.microsoft.com/en-us/power-platform/admin/environment-groups)
 - **8.2** **Flow trigger distribution (connector-based triggers only)**
   - **Rated:** Informational. The most common connector-based triggers. The inventory does not expose HTTP request triggers, so the definition scan below covers them.
-  - **Do:** The inventory does not expose HTTP request triggers. Review flows with "When an HTTP request is received" manually.
+  - **Do:** The inventory does not expose HTTP request triggers. The finding Flows started by an HTTP request trigger covers them when the Dataverse flow definition scan runs; otherwise review flows with "When an HTTP request is received" manually.
   - **Why:** A flow started by an HTTP request can be called by anyone who has the URL, so access and input need to be restricted.
   - **Learn:** [Add OAuth authentication for HTTP request triggers](https://learn.microsoft.com/en-us/power-automate/oauth-authentication); [Secure data used in cloud flows](https://learn.microsoft.com/en-us/power-automate/guidance/coding-guidelines/use-secure-inputs-outputs-triggers)
 - **8.2** **Flows started by an HTTP request trigger**
-  - **Rated:** Critical. Fail when an HTTP-triggered flow can be called by anyone (All, Anonymous or Anyone); Warning when HTTP-triggered flows exist but none is open to anyone; Pass when there are none. Needs the Dataverse flow definition scan.
-  - **Do:** Restrict who can trigger each flow (specific users in the tenant), validate input and treat the URL as a secret; review any set to Anyone first.
+  - **Rated:** Critical. Fail when an HTTP-triggered flow has Who can trigger the flow? set to Anyone (`triggerAuthenticationType` All, Anonymous or Anyone); Warning when none is set to Anyone but some flows do not state a recognized setting in their definition (verify those in the designer; the script does not assume what a missing setting means); Pass when every HTTP-triggered flow is restricted to Any user in my tenant or Specific users in my tenant, or when there are none. The evidence lists each flow with its setting and whether it is On, Off or Suspended. Needs the Dataverse flow definition scan.
+  - **Do:** Set Who can trigger the flow? to Any user in my tenant or Specific users in my tenant on each flow, validate the input and treat the URL as a secret; review flows set to Anyone first.
   - **Why:** A flow started by an HTTP request can be called by anyone who has the URL, so access and input need to be restricted.
   - **Learn:** [Add OAuth authentication for HTTP request triggers](https://learn.microsoft.com/en-us/power-automate/oauth-authentication); [Secure data used in cloud flows](https://learn.microsoft.com/en-us/power-automate/guidance/coding-guidelines/use-secure-inputs-outputs-triggers)
 - **8.3** **Possible hard-coded secrets in flow definitions (heuristic)**
@@ -816,8 +816,8 @@ Every automated finding is listed below, grouped like the report: six sections a
   - **Why:** Conversation audit logging records what agents said and did, which investigations and compliance reviews depend on.
   - **Learn:** [View admin activity logs in Microsoft Purview](https://learn.microsoft.com/en-us/power-platform/admin/activity-logging-auditing/activity-logs-power-platform-admin); [Control transcript access and retention](https://learn.microsoft.com/en-us/microsoft-copilot-studio/admin-transcript-controls); [Monitor agent performance](https://learn.microsoft.com/en-us/microsoft-copilot-studio/analytics-overview)
 - **14.3** **Weekly admin digest enabled**
-  - **Rated:** Medium. Pass when `powerPlatform.governance.disableAdminDigest` is false, otherwise Fail.
-  - **Do:** Keep the admin digest on so managed environment usage and recommendations reach admins.
+  - **Rated:** Medium. Pass when `powerPlatform.governance.disableAdminDigest` is false, otherwise Info (recommended, never a gap): the digest is a Managed Environments feature.
+  - **Do (optional):** keep the admin digest on so managed environment usage and recommendations reach admins.
   - **Why:** The weekly admin digest keeps new risks in front of admins without anyone having to go looking.
   - **Learn:** [Tenant settings](https://learn.microsoft.com/en-us/power-platform/admin/tenant-settings); [Rules for environment groups](https://learn.microsoft.com/en-us/power-platform/admin/environment-groups-rules)
 - **14.3** **Environment group rule: AdminDigest**
@@ -866,7 +866,7 @@ Every automated finding is listed below, grouped like the report: six sections a
   - **Rated:** Informational. Environments per geography.
   - **Do:** Confirm every geography is approved for the data it holds and review cross-geo generative AI data movement.
   - **Why:** Where data is stored and processed affects privacy and data-residency obligations.
-  - **Learn:** [Regions overview](https://learn.microsoft.com/en-us/power-platform/admin/regions-overview); [Move data across regions for Copilots and AI agents](https://learn.microsoft.com/en-us/power-platform/admin/geographical-availability-copilot); [Configure data movement across geographic locations](https://learn.microsoft.com/en-us/microsoft-copilot-studio/manage-data-movement-outside-us)
+  - **Learn:** [Choose the region when setting up an environment](https://learn.microsoft.com/en-us/power-platform/admin/regions-overview); [Move data across regions for Copilots and AI agents](https://learn.microsoft.com/en-us/power-platform/admin/geographical-availability-copilot); [Configure data movement across geographic locations](https://learn.microsoft.com/en-us/microsoft-copilot-studio/manage-data-movement-outside-us)
 - **16.1** **Model data sharing with Microsoft disabled**
   - **Rated:** Medium. Pass when `powerPlatform.modelExperimentation.enableModelDataSharing` is false, otherwise Fail.
   - **Do:** Leave Power Automate Copilot data sharing off unless approved by privacy and legal.
@@ -1026,7 +1026,7 @@ The risk views add points for each signal that is present and list the signals b
 |---|---|
 | Dataverse for Teams environment (deprecated) | 3 |
 | Not managed (recommended): default, production or developer / sandbox / other | 10 / 4 / 3 |
-| No security group: production or sandbox / trial or developer | 12 / 3 |
+| No security group: production or sandbox / trial | 12 / 3 |
 | Conversation audit logging off | 10 |
 | Dataverse auditing off: production or default / other | 15 / 6 |
 | Guest access to Dataverse allowed on production or default | 8 |
@@ -1043,7 +1043,7 @@ The risk views add points for each signal that is present and list the signals b
 
 The script is deliberately honest about its limits.
 
-**Framework items that need a person.** Items such as the governance charter and RACI, intake and approval workflow, maker training, exception management, SIEM ingestion and detections, alerting, the incident response runbook, DPIA and sensitive data in agents, and evaluation and testing practice are listed in the report's **Manual checks** section, grouped by area, with what to check, how to verify it and the target state. That list is built from `PPCS-Checklist.csv`: place it next to the script (or pass `-ChecklistPath`) with the columns `Id, Topic, Feature, Check, Verify, Target, Priority` (optional extra columns `Why`, `Reference`, `Framework`). Without it the report still runs, but manual items and coverage are not listed.
+**Framework items that need a person.** Items such as the governance charter and RACI, intake and approval workflow, maker training, exception management, SIEM ingestion and detections, alerting, the incident response runbook, DPIA and sensitive data in agents, and evaluation and testing practice are listed in the report's **Manual checks** section, grouped by area, with what to check, how to verify it and the target state. That list is built from `PPCS-Checklist.csv`, which is included in this repository next to the script (or pass `-ChecklistPath`). It has the columns `Id, Topic, Feature, Check, Verify, Target, Priority` (optional extra columns `Why`, `Reference`, `Framework`). The framework document is its source: run `.\tools\Export-Checklist.ps1` to rebuild the file after the document changes or if the file is ever lost, and `.\tools\Test-Checklist.ps1` to confirm it is present, current and complete. Without it the report still runs, but manual items and coverage are not listed, and findings that do not set their own severity default to Medium (so the Critical and High counts, the roadmap and Fix these first can differ from a run that has the checklist). The script warns and records this in the report's limitations.
 
 **Settings the script does not read yet.** The script reads these only where a documented read path exists. The items below are worth reviewing by hand until a check can be added.
 
@@ -1057,7 +1057,7 @@ The script is deliberately honest about its limits.
 | Customer Lockbox | PPAC > Security > Overview (Managed Environments) | [Customer Lockbox](https://learn.microsoft.com/en-us/power-platform/admin/about-lockbox) |
 | Block unmanaged customizations | PPAC > environment > Settings > Product > Features | [Block unmanaged customizations in Dataverse](https://learn.microsoft.com/en-us/power-platform/alm/block-unmanaged-customizations) |
 | Purview integration for Copilot Studio (DSPM for AI, auditing, sensitivity labels, DLP, insider risk, retention) | Microsoft Purview portal | [Microsoft Purview and Copilot Studio](https://learn.microsoft.com/en-us/purview/ai-copilot-studio) |
-| Connection ownership and sharing, and custom connector authentication | PPAC > Connections; Power Automate > Custom connectors | [Custom connector parity](https://learn.microsoft.com/en-us/power-platform/admin/dlp-custom-connector-parity) |
+| Connection ownership and sharing, and custom connector authentication | PPAC > Connections; Power Automate > Custom connectors | [Data policies for custom connectors](https://learn.microsoft.com/en-us/power-platform/admin/dlp-custom-connector-parity) |
 | Other tenant settings not listed above (for example Copilot Studio authors, flow run resubmission) | PPAC > Settings. The tenant settings snapshot (2.3) lists whatever the service returns. | [Tenant settings](https://learn.microsoft.com/en-us/power-platform/admin/tenant-settings) |
 
 **Coverage limits.**
@@ -1085,7 +1085,7 @@ Each run writes a `PPCS-Review-<timestamp>` folder:
 ## Data handling and safety
 
 - **Read-only.** The script never creates, changes or deletes anything in the tenant.
-- **Tokens stay in memory.** They are not written to disk. Prefer `PPCS_ACCESS_TOKEN` to `-AccessToken` so a token stays out of shell history.
+- **Tokens stay in memory.** The script never writes them to disk (the optional Az.Accounts and Power Apps admin modules keep their own sign-in caches). Prefer `PPCS_ACCESS_TOKEN` to `-AccessToken` so a token stays out of shell history.
 - **Secrets are not recorded.** The secret scans in flows and agent topics report that a key, token or password-like value exists, never the value.
 - **The output folder contains tenant data** such as user names, environment names and agent names. Store and share it accordingly. `.gitignore` excludes `PPCS-Review-*/` so a run is not committed by accident.
 - **Spreadsheet safety.** CSV cells that start with `=`, `+`, `-` or `@` are prefixed with an apostrophe so a maker-chosen name cannot run as a formula, and the HTML report encodes all names.
@@ -1111,12 +1111,16 @@ Start with **Appendix > Data collection health** in the report, or `api-log.csv`
 | Path | Purpose |
 |---|---|
 | `Invoke-PPCSReview.ps1` | The review script. |
-| `PowerPlatform_CopilotStudio_Security_Review_v2.docx`, `.pptx` | The assessment framework the checks and scoring follow. |
+| `PPCS-Checklist.csv` | The 167 framework checklist items the script reads for its manual-checks list, coverage and default severities. Keep it next to the script. Generated from the framework document. |
+| `PowerPlatform_CopilotStudio_Security_Review_v2.docx`, `.pptx` | The assessment framework the checks and scoring follow. The `.docx` is the source of `PPCS-Checklist.csv`. |
 | `README.md` | This file. |
 | `CHANGELOG.md` | What changed in each version. |
 | `CONTRIBUTING.md` | Conventions for changing the script, adding a check and keeping this reference current. |
 | `tools/Test-ReadmeCoverage.ps1` | Checks that every finding in the script appears in this README. |
-| `.gitignore`, `.gitattributes` | Exclude run folders; keep the script's encoding and line endings intact. |
+| `tools/Export-Checklist.ps1` | Rebuilds `PPCS-Checklist.csv` from the framework document. |
+| `tools/Test-Checklist.ps1` | Checks that `PPCS-Checklist.csv` is present, matches the framework document and covers every check ID the script reports. |
+| `.github/workflows/validate.yml` | Runs the parse, lint, README coverage and checklist checks on every push and pull request. |
+| `.gitignore`, `.gitattributes` | Exclude run folders; keep the script's and the checklist's encoding and line endings intact. |
 
 ## Related tools
 
