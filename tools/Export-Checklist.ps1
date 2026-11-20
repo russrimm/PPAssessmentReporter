@@ -9,6 +9,10 @@
     reads the 18 checklist tables in the document and writes the CSV from them. Run it whenever the document changes,
     or to restore the CSV if it is ever lost.
 
+    The script also carries a compressed copy of the CSV (between the EMBEDDED CHECKLIST markers) that it uses when no CSV
+    is found next to it, so a script copied on its own still has the framework checklist. This tool keeps that copy in
+    step with the CSV; pass -NoScriptUpdate to leave the script alone.
+
     Output columns: Id, Topic, Feature, Check, Verify, Target, Priority. Text is normalized to the repository rules:
     ASCII only and US English (typographic punctuation becomes plain punctuation, and UK spellings are converted).
     The file is written as UTF-8 with a byte order mark so Windows PowerShell 5.1 and PowerShell 7 read it the same way.
@@ -20,13 +24,21 @@
 .PARAMETER OutputPath
     Where to write the CSV. Default: PPCS-Checklist.csv in the repository root, which is where the review script looks.
 
+.PARAMETER ScriptPath
+    The review script whose built-in checklist copy is updated. Default: Invoke-PPCSReview.ps1 in the repository root.
+
+.PARAMETER NoScriptUpdate
+    Write the CSV only; do not touch the review script.
+
 .EXAMPLE
     .\tools\Export-Checklist.ps1
 #>
 [CmdletBinding()]
 param(
     [string]$DocxPath,
-    [string]$OutputPath
+    [string]$OutputPath,
+    [string]$ScriptPath,
+    [switch]$NoScriptUpdate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,6 +46,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $(if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path })
 if (-not $DocxPath) { $DocxPath = Join-Path $repoRoot 'PowerPlatform_CopilotStudio_Security_Review_v2.docx' }
 if (-not $OutputPath) { $OutputPath = Join-Path $repoRoot 'PPCS-Checklist.csv' }
+if (-not $ScriptPath) { $ScriptPath = Join-Path $repoRoot 'Invoke-PPCSReview.ps1' }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # Typographic characters that appear in the framework document, written as code points so this file stays ASCII.
@@ -57,6 +70,14 @@ $spelling = [ordered]@{
     'serialised' = 'serialized'; 'visualise' = 'visualize'; 'visualised' = 'visualized'; 'finalised' = 'finalized'
 }
 
+# One compiled pattern for every spelling (a separate regex per spelling per cell is very slow), keeping a leading capital.
+$spellingRegex = New-Object System.Text.RegularExpressions.Regex(('\b(?:' + (($spelling.Keys | Sort-Object { $_.Length } -Descending | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')\b'), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+$spellingEvaluator = [System.Text.RegularExpressions.MatchEvaluator]({
+        param($m)
+        $us = $spelling[$m.Value.ToLowerInvariant()]
+        if ($m.Value[0] -cmatch '[A-Z]') { $us.Substring(0, 1).ToUpperInvariant() + $us.Substring(1) } else { $us }
+    }).GetNewClosure()
+
 function ConvertTo-PlainText {
     param([string]$Text)
     $sb = New-Object System.Text.StringBuilder
@@ -67,10 +88,7 @@ function ConvertTo-PlainText {
         else { throw ("Unmapped character U+{0:X4} in text: {1}. Add it to the punctuation table in this tool." -f $cp, $Text) }
     }
     $out = $sb.ToString()
-    foreach ($k in $spelling.Keys) {
-        $us = $spelling[$k]
-        $out = [regex]::Replace($out, "\b$([regex]::Escape($k))\b", { param($m) if ($m.Value[0] -cmatch '[A-Z]') { $us.Substring(0, 1).ToUpperInvariant() + $us.Substring(1) } else { $us } }, 'IgnoreCase')
-    }
+    $out = $spellingRegex.Replace($out, $spellingEvaluator)
     return ($out -replace '\s+', ' ').Trim()
 }
 
@@ -142,3 +160,40 @@ $target = [System.IO.Path]::GetFullPath($OutputPath)
 $text = ((@($sorted | ConvertTo-Csv -NoTypeInformation)) -join "`r`n") + "`r`n"
 [System.IO.File]::WriteAllText($target, $text, (New-Object System.Text.UTF8Encoding($true)))
 "Wrote $($sorted.Count) checklist items from $tables tables to $target"
+
+# Keep the copy built into the review script in step with the CSV, so a script copied on its own still has the checklist.
+if (-not $NoScriptUpdate) {
+    $scriptFile = (Resolve-Path -LiteralPath $ScriptPath).Path
+    $csvBytes = [System.IO.File]::ReadAllBytes($target)
+    $ms = New-Object System.IO.MemoryStream
+    $gz = New-Object System.IO.Compression.GZipStream($ms, [System.IO.Compression.CompressionLevel]::Optimal)
+    $gz.Write($csvBytes, 0, $csvBytes.Length); $gz.Dispose()
+    $b64 = [Convert]::ToBase64String($ms.ToArray())
+    $wrapped = ([regex]::Matches($b64, '.{1,100}') | ForEach-Object { $_.Value }) -join "`r`n"
+
+    # ReadAllText drops the byte order mark and WriteAllText adds it back, so the script keeps exactly one.
+    $src = [System.IO.File]::ReadAllText($scriptFile, [System.Text.Encoding]::UTF8)
+    $pattern = "(?s)# BEGIN EMBEDDED CHECKLIST\r\n\`$EmbeddedChecklist = @'\r\n(.*?)(?:\r\n)?'@\r\n# END EMBEDDED CHECKLIST"
+    $m = [regex]::Match($src, $pattern)
+    if (-not $m.Success) { throw "The embedded checklist markers were not found in $scriptFile." }
+
+    # Compressed bytes can differ between PowerShell editions, so the block is rewritten only when the decoded content differs.
+    $same = $false
+    $current = ($m.Groups[1].Value -replace '\s', '')
+    if ($current) {
+        try {
+            $in = New-Object System.IO.MemoryStream(, [Convert]::FromBase64String($current))
+            $dz = New-Object System.IO.Compression.GZipStream($in, [System.IO.Compression.CompressionMode]::Decompress)
+            $out = New-Object System.IO.MemoryStream; $dz.CopyTo($out); $dz.Dispose()
+            $same = ([Convert]::ToBase64String($out.ToArray()) -eq [Convert]::ToBase64String($csvBytes))
+        }
+        catch { $same = $false }
+    }
+    if ($same) { 'The checklist built into the script is already current.' }
+    else {
+        $block = "# BEGIN EMBEDDED CHECKLIST`r`n`$EmbeddedChecklist = @'`r`n" + $wrapped + "`r`n'@`r`n# END EMBEDDED CHECKLIST"
+        $updated = $src.Substring(0, $m.Index) + $block + $src.Substring($m.Index + $m.Length)
+        [System.IO.File]::WriteAllText($scriptFile, $updated, (New-Object System.Text.UTF8Encoding($true)))
+        "Updated the checklist built into $scriptFile ($($b64.Length) base64 characters)."
+    }
+}

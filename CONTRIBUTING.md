@@ -46,7 +46,7 @@ New functions should use singular nouns and avoid unused parameters so the lint 
 
 ## The checklist file
 
-`PPCS-Checklist.csv` is generated from the framework document (`PowerPlatform_CopilotStudio_Security_Review_v2.docx`), which is the source of truth. Do not edit the CSV by hand. Change the document, run `.\tools\Export-Checklist.ps1`, and commit both. The tool is ASCII and US English only, writes UTF-8 with a byte order mark and CRLF, and `.gitattributes` stops Git from rewriting the file. If you add a check with a new ID, the ID must exist in the document's checklist, or `tools\Test-Checklist.ps1` fails. The framework document's summary table currently disagrees with its own item table for area 18 (the export prints a warning and uses the item table); fix that in the document.
+`PPCS-Checklist.csv` is generated from the framework document (`PowerPlatform_CopilotStudio_Security_Review_v2.docx`), which is the source of truth. Do not edit the CSV by hand. Change the document, run `.\tools\Export-Checklist.ps1`, and commit all of it. The tool also rewrites the compressed copy of the checklist inside `Invoke-PPCSReview.ps1` (the `EMBEDDED CHECKLIST` block, which the script uses when no CSV is found next to it); never edit that block by hand either. The tool is ASCII and US English only, writes UTF-8 with a byte order mark and CRLF, and `.gitattributes` stops Git from rewriting the CSV. If you add a check with a new ID, the ID must exist in the document's checklist, or `tools\Test-Checklist.ps1` fails. That test also fails when the CSV, the built-in copy and the document disagree, and it runs in CI.
 
 ## Testing
 

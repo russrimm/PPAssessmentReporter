@@ -91,7 +91,7 @@ Version 2.1.0 (see [CHANGELOG.md](CHANGELOG.md)):
 
 ## Quick start
 
-Requirements: PowerShell 7 or later (recommended; Windows PowerShell 5.1 works but can fail on large inventory responses) and a signed-in user with the access described below. The default sign-in needs no modules. Keep `PPCS-Checklist.csv` next to the script: clone the repository or download both files. Without the checklist the script still runs, but it warns and the report loses its manual-checks list and coverage, and findings that set no severity of their own default to Medium.
+Requirements: PowerShell 7 or later (recommended; Windows PowerShell 5.1 works but can fail on large inventory responses) and a signed-in user with the access described below. The default sign-in needs no modules. The script carries its own copy of the framework checklist, so it works when copied on its own; a `PPCS-Checklist.csv` next to the script (it is in this repository) is used instead when present, so you can customize it.
 
 ```powershell
 # Interactive sign-in with a device code, open the report when done
@@ -137,7 +137,7 @@ Optional components: `Az.Accounts` for `-AuthMethod Az`, and `Microsoft.PowerApp
 | `-ClientId` | `1950a258-227b-4e31-a9cf-717495945fc2` | Public client for device code sign-in. |
 | `-AccessToken` | none | Bearer token for `https://api.powerplatform.com` with `-AuthMethod Token`. If omitted, the `PPCS_ACCESS_TOKEN` environment variable is used. |
 | `-OutputPath` | `.\PPCS-Review-<timestamp>` | Folder for the report and exports. |
-| `-ChecklistPath` | `PPCS-Checklist.csv` next to the script | Framework checklist, included in the repository. When present, items that are not automated are listed as manual checks, coverage is calculated and each finding without its own severity takes the checklist priority. Without it, those findings default to Medium severity. |
+| `-ChecklistPath` | `PPCS-Checklist.csv` next to the script | Framework checklist. When the file is not found, the copy built into the script is used. Items that are not automated are listed as manual checks, coverage is calculated and each finding without its own severity takes the checklist priority. The Run parameters table in the appendix and `run-summary.json` show which source was used. |
 | `-PowerPlatformApiHost`, `-BapApiHost`, `-GraphHost`, `-BapResource` | `api.powerplatform.com`, `api.bap.microsoft.com`, `graph.microsoft.com`, `https://service.powerapps.com` | Endpoint overrides, for example for sovereign clouds (not tested). |
 | `-SkipLegacyApis` | off | Skip everything read from `api.bap.microsoft.com`: tenant settings, tenant isolation, data policies and Managed Environment settings. |
 | `-SkipEntra` | off | Skip Microsoft Graph checks: admin roles, PIM, Conditional Access and owner lookup. |
@@ -966,7 +966,7 @@ Every automated finding is listed below, grouped like the report: six sections a
   - **Why:** Credit consumption shows which agents cost money and which are idle but still exposed.
   - **Learn:** [Manage Copilot Credits and capacity](https://learn.microsoft.com/en-us/power-platform/admin/manage-copilot-studio-copilot-credits-capacity); [Monitor agent performance](https://learn.microsoft.com/en-us/microsoft-copilot-studio/analytics-overview); [Govern Copilot Credit consumption](https://learn.microsoft.com/en-us/microsoft-copilot-studio/guidance/govern-credit-consumption)
 - **18.8** **Power Pages sites without traffic**
-  - **Rated:** Heuristic. Warning when Advisor lists sites with no traffic in 30 days; Pass when none; Info when no traffic scenario was returned.
+  - **Rated:** High, heuristic. Warning when Advisor lists sites with no traffic in 30 days; Pass when none; Info when no traffic scenario was returned. The High severity comes from the framework checklist, where it matches the Advisor recommendation's own High severity.
   - **Do:** Shut down or retire sites nobody visits; each one is an exposed endpoint.
   - **Why:** Usage shows where risk and value meet: heavily used assets deserve stronger controls, and unused ones are risk with no benefit.
   - **Learn:** [Actions overview (Advisor recommendations)](https://learn.microsoft.com/en-us/power-platform/admin/power-platform-advisor); [Usage insights](https://learn.microsoft.com/en-us/power-platform/admin/managed-environment-usage-insights); [Power Platform inventory](https://learn.microsoft.com/en-us/power-platform/admin/power-platform-inventory)
@@ -1043,7 +1043,7 @@ The risk views add points for each signal that is present and list the signals b
 
 The script is deliberately honest about its limits.
 
-**Framework items that need a person.** Items such as the governance charter and RACI, intake and approval workflow, maker training, exception management, SIEM ingestion and detections, alerting, the incident response runbook, DPIA and sensitive data in agents, and evaluation and testing practice are listed in the report's **Manual checks** section, grouped by area, with what to check, how to verify it and the target state. That list is built from `PPCS-Checklist.csv`, which is included in this repository next to the script (or pass `-ChecklistPath`). It has the columns `Id, Topic, Feature, Check, Verify, Target, Priority` (optional extra columns `Why`, `Reference`, `Framework`). The framework document is its source: run `.\tools\Export-Checklist.ps1` to rebuild the file after the document changes or if the file is ever lost, and `.\tools\Test-Checklist.ps1` to confirm it is present, current and complete. Without it the report still runs, but manual items and coverage are not listed, and findings that do not set their own severity default to Medium (so the Critical and High counts, the roadmap and Fix these first can differ from a run that has the checklist). The script warns and records this in the report's limitations.
+**Framework items that need a person.** Items such as the governance charter and RACI, intake and approval workflow, maker training, exception management, SIEM ingestion and detections, alerting, the incident response runbook, DPIA and sensitive data in agents, and evaluation and testing practice are listed in the report's **Manual checks** section, grouped by area, with what to check, how to verify it and the target state. That list is built from the framework checklist. The script carries a compressed copy of it, and a `PPCS-Checklist.csv` next to the script (or passed with `-ChecklistPath`) is used instead when present. The file has the columns `Id, Topic, Feature, Check, Verify, Target, Priority` (optional extra columns `Why`, `Reference`, `Framework`). The framework document is the source of both copies: run `.\tools\Export-Checklist.ps1` to rebuild the CSV and the built-in copy after the document changes, and `.\tools\Test-Checklist.ps1` to confirm they are present, current and identical. Only if neither copy can be read does the report lose its manual items and coverage and default findings without their own severity to Medium (so the Critical and High counts, the roadmap and Fix these first can differ); the script then warns and records it in the report's limitations.
 
 **Settings the script does not read yet.** The script reads these only where a documented read path exists. The items below are worth reviewing by hand until a check can be added.
 
@@ -1110,15 +1110,15 @@ Start with **Appendix > Data collection health** in the report, or `api-log.csv`
 
 | Path | Purpose |
 |---|---|
-| `Invoke-PPCSReview.ps1` | The review script. |
-| `PPCS-Checklist.csv` | The 167 framework checklist items the script reads for its manual-checks list, coverage and default severities. Keep it next to the script. Generated from the framework document. |
+| `Invoke-PPCSReview.ps1` | The review script. It includes a compressed copy of the checklist (the `EMBEDDED CHECKLIST` block), used when no CSV is found next to it. |
+| `PPCS-Checklist.csv` | The 167 framework checklist items the script reads for its manual-checks list, coverage and default severities. Generated from the framework document. A CSV next to the script overrides the built-in copy. |
 | `PowerPlatform_CopilotStudio_Security_Review_v2.docx`, `.pptx` | The assessment framework the checks and scoring follow. The `.docx` is the source of `PPCS-Checklist.csv`. |
 | `README.md` | This file. |
 | `CHANGELOG.md` | What changed in each version. |
 | `CONTRIBUTING.md` | Conventions for changing the script, adding a check and keeping this reference current. |
 | `tools/Test-ReadmeCoverage.ps1` | Checks that every finding in the script appears in this README. |
-| `tools/Export-Checklist.ps1` | Rebuilds `PPCS-Checklist.csv` from the framework document. |
-| `tools/Test-Checklist.ps1` | Checks that `PPCS-Checklist.csv` is present, matches the framework document and covers every check ID the script reports. |
+| `tools/Export-Checklist.ps1` | Rebuilds `PPCS-Checklist.csv` and the script's built-in checklist copy from the framework document. |
+| `tools/Test-Checklist.ps1` | Checks that `PPCS-Checklist.csv` is present, matches the framework document, equals the script's built-in copy and covers every check ID the script reports. |
 | `.github/workflows/validate.yml` | Runs the parse, lint, README coverage and checklist checks on every push and pull request. |
 | `.gitignore`, `.gitattributes` | Exclude run folders; keep the script's and the checklist's encoding and line endings intact. |
 
