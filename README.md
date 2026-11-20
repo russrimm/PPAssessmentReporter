@@ -4,6 +4,8 @@
 
 > **Not an official Microsoft product.** This is a personal creation of Russ Rimmerman (Cloud Solution Architect), built to help customers evaluate the current state of their overall Power Platform governance. It is not supported by Microsoft. See the disclaimer at the top of the script.
 
+**Ready to run it?** Follow the [Quick start](#quick-start) below for download, setup, sign-in and report-opening instructions.
+
 ## What the report looks like
 
 The screenshots below come from the redacted sample report. [Open the full sample report](docs/sample-report/PowerPlatformCopilotStudioAudit.html) (download it and open it in a browser; GitHub shows HTML files as source, not rendered).
@@ -91,27 +93,92 @@ Version 2.1.0 (see [CHANGELOG.md](CHANGELOG.md)):
 
 ## Quick start
 
-Requirements: PowerShell 7 or later (recommended; Windows PowerShell 5.1 works but can fail on large inventory responses) and a signed-in user with the access described below. The default sign-in needs no modules. The script carries its own copy of the framework checklist, so it works when copied on its own; a `PPCS-Checklist.csv` next to the script (it is in this repository) is used instead when present, so you can customize it.
+### 1. Check what you need
+
+- **PowerShell 7 or later is recommended.** On Windows, [install PowerShell](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows) if needed, then open **PowerShell 7** from the Start menu. Windows PowerShell 5.1 also works but can fail on large inventory responses.
+- **A user account in the tenant you want to review**, normally with the Power Platform Administrator role. Activate the role first if your organization uses Privileged Identity Management (PIM). See [Access required](#access-required) for the additional Microsoft Graph and Dataverse permissions. Service principal sign-in is not supported.
+- **Internet access** to Microsoft sign-in and the APIs listed under [Data handling and safety](#data-handling-and-safety), and a local folder where you can save the results.
+
+The default sign-in needs **no additional PowerShell modules**. You do not need to run PowerShell as a local Windows administrator; tenant permissions are separate from local administrator rights.
+
+### 2. Download and open the script folder
+
+On this repository's GitHub page, select **Code > Download ZIP**, then right-click the downloaded ZIP in File Explorer and select **Extract All**. Open the extracted folder that contains `Invoke-PPCSReview.ps1`. Do not run it from inside the ZIP or double-click the script.
+
+In PowerShell 7, change to that folder. Replace the example path below with your actual extracted folder path; keep the quotes if it contains spaces.
 
 ```powershell
-# Interactive sign-in with a device code, open the report when done
+Set-Location "C:\Users\YourName\Downloads\PPAssessmentReporter-main"
+$PSVersionTable.PSVersion
+Get-Item .\Invoke-PPCSReview.ps1
+```
+
+The version command should show a major version of **7 or higher** for the recommended setup. `Get-Item` should show the script; if it says the file is missing, check the folder path before continuing.
+
+The script carries its own copy of the framework checklist, so it also works when copied on its own. Leave the repository's `PPCS-Checklist.csv` beside it when using the ZIP download; that file takes precedence over the built-in copy. You do not need the Word or PowerPoint files to run a review.
+
+### 3. Allow the downloaded script to run, if needed
+
+Read the script before running it. On Windows, if you trust this downloaded copy, remove its downloaded-file block:
+
+```powershell
+Unblock-File -LiteralPath .\Invoke-PPCSReview.ps1
+```
+
+If PowerShell says **running scripts is disabled on this system**, and your organization's policy permits it, allow local scripts for this PowerShell window only:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+```
+
+This setting ends when you close the window. It does not override an organization-managed execution policy. If the command is blocked by policy, ask your administrator for an approved way to run the script rather than changing machine-wide settings.
+
+### 4. Run the review and sign in
+
+Run this command in the same PowerShell window, replacing `contoso.onmicrosoft.com` with the tenant domain or tenant ID you want to review:
+
+```powershell
+.\Invoke-PPCSReview.ps1 -TenantId "contoso.onmicrosoft.com" -OpenReport
+```
+
+Keep the `.\` at the beginning: it tells PowerShell to run the script in the current folder. To add a customer name to the report cover, append `-CustomerName "Contoso"`.
+
+The script displays a Microsoft sign-in URL and a device code. Open that URL in your browser, enter the code, and sign in with the user account for the target tenant. Complete any required MFA or consent prompts. Only enter the code shown by the script you just started, and verify the account and tenant before approving sign-in.
+
+Return to PowerShell and keep the window open while it displays `Loading Power Platform inventory and environments...` and `Checking:` messages. Run time depends on tenant size, scan limits and API throttling. The script reads tenant data; it does not change tenant settings.
+
+### 5. Open and review the results
+
+When collection finishes, PowerShell displays **`Done.`**, finding counts and a **`Report:`** path. `-OpenReport` opens `report.html` in your default browser. If it does not open, use File Explorer to open the file at the displayed path.
+
+By default, the report and exports are saved in a new `PPCS-Review-<timestamp>` folder **under the folder you ran the command from**. To choose another location, add `-OutputPath "C:\Reports\Contoso-Review-20261120"` to the run command; use a new folder for each run to preserve earlier results.
+
+Start with **Summary** and **Start here**, then check **Appendix > Data collection health** for missing access or failed API calls. **Not verified** means data could not be read, not that a control passed. Review **Manual checks** for items that still need a person. See [Output files](#output-files) for the CSV and JSON exports. The output contains tenant data; store and share the entire folder accordingly.
+
+### Other run options
+
+These commands assume you are already in the script folder:
+
+```powershell
+# Let sign-in determine the tenant instead of specifying one
 .\Invoke-PPCSReview.ps1 -OpenReport
 
-# A specific customer tenant, skipping the checks you cannot access
+# Skip Graph and Dataverse checks when you do not have their permissions
 .\Invoke-PPCSReview.ps1 -TenantId contoso.onmicrosoft.com -CustomerName "Contoso" -SkipDataverse -SkipEntra
 
 # Reuse an Az.Accounts session (Install-Module Az.Accounts)
 .\Invoke-PPCSReview.ps1 -AuthMethod Az
 
-# Power Platform API only, with a token you already have (kept out of shell history)
-$env:PPCS_ACCESS_TOKEN = '<token for https://api.powerplatform.com>'
+# Power Platform API only; prompt for an existing token without saving it in shell history
+$env:PPCS_ACCESS_TOKEN = [System.Net.NetworkCredential]::new('', (Read-Host 'Power Platform access token' -AsSecureString)).Password
 .\Invoke-PPCSReview.ps1 -AuthMethod Token
+Remove-Item Env:\PPCS_ACCESS_TOKEN
 
-# Compare with a previous run
+# Compare with a previous run (replace this example with your previous output folder)
 .\Invoke-PPCSReview.ps1 -BaselinePath .\PPCS-Review-20261101-090000
 ```
 
-Each run writes a `PPCS-Review-<timestamp>` folder. Open `report.html`. Run `Get-Help .\Invoke-PPCSReview.ps1 -Full` for every parameter.
+Skip switches reduce coverage; they do not grant access. Token mode covers only the Power Platform API and skips Microsoft Graph, BAP and Dataverse checks. Run `Get-Help .\Invoke-PPCSReview.ps1 -Full` for every parameter, or see the [Parameters](#parameters) table below.
 
 ## Access required
 
@@ -1097,6 +1164,9 @@ Start with **Appendix > Data collection health** in the report, or `api-log.csv`
 
 | Symptom | Likely cause | What to do |
 |---|---|---|
+| `.\Invoke-PPCSReview.ps1` is not recognized, or the file cannot be found | PowerShell is in the wrong folder, or the ZIP was not extracted | Follow [Quick start, step 2](#2-download-and-open-the-script-folder). Use `Get-Item .\Invoke-PPCSReview.ps1` to confirm the file is in the current folder. |
+| The script is not digitally signed, or running scripts is disabled | Windows blocked the downloaded file, or execution policy prevents scripts | Follow [Quick start, step 3](#3-allow-the-downloaded-script-to-run-if-needed). Organization-managed policy needs an administrator-approved solution. |
+| Device code sign-in is blocked by Conditional Access | Your organization does not allow this sign-in method | Ask your administrator for an approved method. If approved, install `Az.Accounts`, connect to the intended tenant with `Connect-AzAccount -Tenant "contoso.onmicrosoft.com"` and run with `-AuthMethod Az`. |
 | Many Not verified findings from `api.powerplatform.com` (401 or 403) | The signed-in user lacks the Power Platform Administrator role, or a service principal was used | Sign in as a user with the role. Service principals are not supported by the inventory API. |
 | Not verified findings from `graph.microsoft.com` (403) | Missing directory read rights or consent for the sign-in client | Use a user with Global Reader, grant consent, supply your own `-ClientId`, or use `-AuthMethod Az`. Use `-SkipEntra` to skip. |
 | Not verified findings for a Dataverse environment (401 or 403) | The user has no security role in that environment | Add the user (for example as System Administrator), or lower `-MaxDataverseEnvironments`. |
