@@ -6,11 +6,31 @@ All notable changes to `Invoke-PPCSReview.ps1`. Dates are release dates.
 
 ### Added
 
+- **`PPCS-Checklist.csv` is now in the repository, and the script carries its own copy.** The script reads the checklist for its manual-checks list, coverage and default severities, but the file was never committed, so a fresh clone ran without it and silently lost them. It now ships with the script (167 items in the framework's 18 areas), and a compressed copy is built into `Invoke-PPCSReview.ps1` so a script copied on its own still has it. A CSV next to the script (or `-ChecklistPath`) overrides the built-in copy. The appendix and `run-summary.json` record which source was used.
+- `tools/Export-Checklist.ps1` rebuilds the CSV and the built-in copy from the framework document (ASCII and US English, identical output on PowerShell 7 and Windows PowerShell 5.1) and cross-checks item counts against the document's own summary table.
+- `tools/Test-Checklist.ps1` fails when the CSV is missing, differs from the framework document, differs from the built-in copy, or lacks a check ID that the script reports.
+- `.github/workflows/validate.yml` runs the parse (both PowerShell editions), lint, README coverage and checklist checks on every push and pull request.
+- If neither checklist copy can be read, the run warns and records it in the report's limitations instead of only a console line.
 - **Related tools links** to the independent [Agent Governance Navigator](https://akadrno.github.io/agent-governance-navigator-site/) by akadrno, in the report's About dialog and footer, the roadmap, the agent risk register and the appendix, plus a Related tools section in the README. Link only: the repository has no published license, so nothing is copied, and the report never contacts the site.
 
 ### Changed
 
 - Roadmap status pills are now aligned in a fixed-width column on the right of each item, so they line up in every column of the 30/60/90-day roadmap.
+- **Optional features stay optional.** Finding 3.1 no longer fails an unmanaged default environment: it is Info with a "Recommended" action, and a Warning only when the default environment holds more assets than `-DefaultEnvironmentAssetWarnThreshold`. Environment routing (3.6) and the weekly admin digest (14.3) are Info when off, because both need Managed Environments.
+- Finding 3.8 no longer counts developer environments, which Microsoft's security group guidance does not cover.
+- The framework document rated checklist item 18.8 (Power Pages sites without traffic) Medium in its item table but counted it High in its own summary table. It is now High in both, matching the Microsoft Advisor recommendation's own High severity and the High rating of its agent counterpart (18.7). The 18.8 finding takes High severity.
+- The README now says that if no checklist copy can be read, findings that set no severity of their own default to Medium.
+
+### Fixed
+
+- Findings 4.6 and 4.7 now treat a connector that is not listed in a policy as Blocked when the policy's default group is Blocked, instead of reporting it as not blocked.
+- Finding 4.6 no longer treats custom connector URL patterns as HTTP endpoint filtering. It reads HTTP endpoint filtering rules when the policy data includes them and reports Warning, not Fail, when it cannot see any.
+- Finding 8.2 (HTTP request triggers) now counts flows set to Anyone, flows with no recognized setting, and restricted flows separately, shows whether each flow is On, Off or Suspended, and is Pass when every HTTP-triggered flow is restricted. A missing setting is listed to verify, never assumed safe or open.
+- Finding 6.1 no longer says the admin center recommendation fires above 10 System Administrators (Microsoft Learn: more than 20, managed environments, preview), and is Not verified when the role members cannot be read instead of a Pass with a count of 0.
+- Finding 2.4 now says that an admin who is only PIM-eligible and has not activated the role is listed as a non-admin creator.
+- The open channel patterns no longer match channel names that only contain the letters "line".
+- `tools/Test-ReadmeCoverage.ps1` reads the bullet layout the README now uses (it found no IDs before) and runs on Windows PowerShell 5.1 (`$PSScriptRoot` is empty in parameter defaults there).
+- Two Microsoft Learn link titles now match the page titles.
 
 ## 2.1.0 - 2026-11-17
 

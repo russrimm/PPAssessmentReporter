@@ -1,0 +1,45 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse the script on PowerShell 7
+        shell: pwsh
+        run: |
+          $e = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile('.\Invoke-PPCSReview.ps1', [ref]$null, [ref]$e)
+          if ($e.Count) { $e | ForEach-Object { Write-Error $_.Message -ErrorAction Continue }; exit 1 }
+
+      - name: Parse the script on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $e = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile('.\Invoke-PPCSReview.ps1', [ref]$null, [ref]$e)
+          if ($e.Count) { $e | ForEach-Object { Write-Error $_.Message -ErrorAction Continue }; exit 1 }
+
+      - name: Lint (no errors allowed)
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $r = Invoke-ScriptAnalyzer -Path .\Invoke-PPCSReview.ps1 -Severity Error
+          $r | Format-Table RuleName, Line, Message -AutoSize
+          if (@($r).Count) { exit 1 }
+
+      - name: Every finding appears in the README
+        shell: pwsh
+        run: .\tools\Test-ReadmeCoverage.ps1
+
+      - name: The checklist is present, current and complete
+        shell: pwsh
+        run: .\tools\Test-Checklist.ps1
