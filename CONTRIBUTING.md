@@ -9,6 +9,7 @@ This is a personal project, but changes are welcome as issues or pull requests. 
 - **Optional features are not gaps.** When a feature is each customer's decision (Managed Environments, default environment routing, the admin digest, IP firewall, cookie binding, sharing limits and similar), report Pass or Info with a "Recommended:" action. Reserve Fail and Warning for controls whose absence is a risk on its own.
 - **Say what you could not confirm.** If a setting might exist but the API data does not show it (for example HTTP endpoint filtering rules, or a missing flow trigger setting), report Warning or Info and say so. Never present "not seen" as "does not exist".
 - **US English** in all text.
+- **Redactable output.** `-Redact` replaces names at the output boundary, so every file the script writes must go through it: write CSV with `Export-SafeCsv`, JSON through `Protect-Object` and HTML through `Protect-Html`, and build file names from redacted text (`Protect-Text`). A new evidence or usage column that holds a name of an environment, agent, app, flow, site, policy, group or person belongs in `$script:RedactionColumns` or `$script:RedactionUserColumns`. The check after writing scans every text file in the output folder, so a file that skips redaction shows up as a warning.
 
 ## Script encoding
 
