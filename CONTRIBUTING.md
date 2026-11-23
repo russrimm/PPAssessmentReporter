@@ -19,8 +19,9 @@ This is a personal project, but changes are welcome as issues or pull requests. 
 1. **Write the check** in a function and call it from `Invoke-Review` through the existing step wrapper, so one failure cannot stop the run. Raise findings with `Add-Finding` (or `Add-Unavailable` when a call failed). Give each one the framework ID, a short title, status, severity, confidence, value, detail, and a `-Recommendation` when there is something to do.
 2. **Add a Why rule** to `$WhyRules` in `Get-WhyText`. Rules are first match wins, so put a title-specific rule before the generic rule for the same ID.
 3. **Add a Learn rule** to `$LearnRules` in `Get-LearnLinks`, with the same ordering rule. Use real `learn.microsoft.com` pages and confirm each URL returns HTTP 200.
-4. **Update the README**: add an entry to the check reference under the right area (a bullet that starts with the ID, then the check title, how it is rated, Do and Why, Learn links). Keep the Why and Learn text identical to the script.
-5. **Update `CHANGELOG.md`** and bump `$ScriptVersion` for a user-visible change.
+4. **Add an owner rule** to `$OwnerRules` in `Get-OwnerRoute`: the role best placed to fix it and an effort level (Quick win, Policy or process change, Project), with the same ordering rule. A finding with no rule falls back to its area's default owner.
+5. **Update the README**: add an entry to the check reference under the right area (a bullet that starts with the ID, then the check title, how it is rated, Do and Why, Learn links). Keep the Why and Learn text identical to the script.
+6. **Update `CHANGELOG.md`** and bump `$ScriptVersion` for a user-visible change.
 
 ## Checks to run before a pull request
 

@@ -133,6 +133,10 @@
     Skip the agent topic, knowledge and trigger scan and the flow definition scan. The agent access settings
     check still runs.
 
+.PARAMETER SkipHandoff
+    Skip the hand-off files: owner-outreach.csv, workitems-azure-devops.csv and workitems-jira.csv. The suggested owner and
+    effort columns in findings.csv, findings.json and findings-register.csv, and in the report, are still written.
+
 .PARAMETER SkipUsage
     Skip the usage and adoption analysis.
 
@@ -184,6 +188,8 @@
         report.html, findings.csv, findings.json, findings-register.csv (framework template, owner/date blank),
         agent-risk-register.csv, environment-profile.csv, run-summary.json, checklist-coverage.csv, api-log.csv,
         usage-*.csv, evidence\*.csv, accepted-risks.csv (only with -ExceptionsPath)
+        Hand-off (off with -SkipHandoff): owner-outreach.csv (one row per asset owner with the assets to fix and the recommended
+        action), workitems-azure-devops.csv and workitems-jira.csv (open Fail and Warning findings for CSV import into a tracker)
 
     The output folder contains tenant data (users, environments, agent names). Store and share it accordingly.
     CSV cells that start with = + - @ are prefixed with an apostrophe so a maker-chosen name cannot run as a
@@ -222,6 +228,7 @@ param(
     [switch]$SkipDataverse,
     [switch]$SkipUsage,
     [switch]$SkipDeepScan,
+    [switch]$SkipHandoff,
     [int]$MaxAgentComponentsPerEnvironment = 2000,
     [int]$MaxFlowDefinitionsPerEnvironment = 300,
     [int]$MaxEntitlementEnvironments = 100,
@@ -1609,6 +1616,7 @@ function Test-AppsFlowsSites {
     param($Inv, $EnvMap, $Catalog)
     $src = 'api.powerplatform.com resourcequery (apps, flows, sites)'
     $apps = @(Get-OkRows $Inv.Apps); $flows = @(Get-OkRows $Inv.Flows); $sites = @(Get-OkRows $Inv.Sites)
+    $script:OwnerCandidates = @(Get-OwnerCandidate -Apps $apps -Flows $flows -EnvMap $EnvMap)
     if (-not $Inv.Apps.Ok) { Add-Unavailable '7.4' 'Power Apps inventory' $Inv.Apps $src }
     if (-not $Inv.Flows.Ok) { Add-Unavailable '8.1' 'Power Automate inventory' $Inv.Flows $src }
     if ($Inv.Apps.Ok) { $script:Kpi['Apps'] = $apps.Count }
@@ -1720,11 +1728,13 @@ function Test-Owners {
             $nm = [string](Get-Prop $o 'displayName' '')
             if (-not $nm) { $nm = [string](Get-Prop $o 'userPrincipalName' '') }
             if ($nm) { $script:OwnerNames[([string]$o.id).ToLower()] = $nm }
+            $upn = [string](Get-Prop $o 'userPrincipalName' '')
+            if ($upn) { $script:OwnerUpns[([string]$o.id).ToLower()] = $upn }
         }
     }
     $missing = @($ids | Where-Object { -not $found.ContainsKey($_) })
     $missingSet = @{}
-    foreach ($m0 in $missing) { $missingSet[$m0] = $true; $script:OwnerNames[([string]$m0).ToLower()] = "(deleted account $(([string]$m0).Substring(0, [Math]::Min(8, ([string]$m0).Length))))" }
+    foreach ($m0 in $missing) { $missingSet[$m0] = $true; $script:OwnerState[([string]$m0).ToLower()] = 'Deleted'; $script:OwnerNames[([string]$m0).ToLower()] = "(deleted account $(([string]$m0).Substring(0, [Math]::Min(8, ([string]$m0).Length))))" }
     # disabled users (batched, capped)
     $disabled = @{}
     $allUsers = @($ids | Where-Object { $found.ContainsKey($_) -and ((Get-Prop $found[$_] '@odata.type' '') -match 'user') })
@@ -1742,6 +1752,7 @@ function Test-Owners {
     }
     foreach ($dk in @($disabled.Keys)) {
         $nm0 = $script:OwnerNames[([string]$dk).ToLower()]
+        $script:OwnerState[([string]$dk).ToLower()] = 'Disabled'
         $script:OwnerNames[([string]$dk).ToLower()] = $(if ($nm0) { "$nm0 (disabled)" } else { '(disabled account)' })
     }
     $orphans = @($res | Where-Object { $_.Owner -and ($missingSet.ContainsKey($_.Owner) -or $disabled.ContainsKey($_.Owner)) })
@@ -3467,6 +3478,8 @@ table.matrix td.h1{background:var(--fail-bg);color:var(--fail);font-weight:700}t
 .fixlist .a:before{content:"Do: ";font-weight:650;color:var(--brand2)}
 .fixlist .w{margin-top:2px;font-size:13px;color:var(--muted)}.fixlist .w:before{content:"Why: ";font-weight:650;color:var(--brand2)}
 .why{margin-top:-4px;font-size:12.5px;color:var(--muted)}.why b{color:var(--brand2)}
+.route{font-size:12.5px;color:var(--muted)}.route b{color:var(--brand2)}
+.fixlist .rt{margin-top:2px;font-size:13px;color:var(--muted)}.fixlist .rt b{font-weight:650;color:var(--brand2)}
 .chip{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:650;line-height:1.5;white-space:nowrap}
 .s-Fail{background:var(--fail-bg);color:var(--fail)}.s-Warning{background:var(--warn-bg);color:var(--warn)}.s-Pass{background:var(--pass-bg);color:var(--pass)}
 .s-Info{background:var(--info-bg);color:var(--info)}.s-Unavailable{background:var(--na-bg);color:var(--na)}.s-Manual{background:var(--man-bg);color:var(--man)}.s-Accepted{background:var(--acc-bg);color:var(--acc)}
@@ -3491,7 +3504,7 @@ table.matrix td.h1{background:var(--fail-bg);color:var(--fail);font-weight:700}t
 .rcol h3{margin:0;font-size:14px}.rcol .when{color:var(--muted);font-size:12px;margin-bottom:8px}
 .rcol ul{list-style:none;margin:0;padding:0;display:grid;gap:7px}.rcol li{font-size:13px;line-height:1.35;display:grid;grid-template-columns:minmax(0,1fr) 5.5rem;gap:8px;align-items:start}
 .rcol li .chip{text-align:center;font-size:11.5px;line-height:1.4;padding:2px 6px}
-.rcol li a{text-decoration:none;color:var(--ink);font-weight:600}.rcol li .id{color:var(--muted);font-size:12px;margin-right:4px}
+.rcol li a{text-decoration:none;color:var(--ink);font-weight:600}.rcol li .id{color:var(--muted);font-size:12px;margin-right:4px}.rcol li .rt{color:var(--muted);font-size:11.5px;margin-top:1px}
 .rcol details summary{cursor:pointer;color:var(--brand2);font-size:12.5px;margin-top:8px}
 .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
 table.data{border-collapse:collapse;width:100%;font-size:12.5px;background:var(--card)}
@@ -3595,9 +3608,9 @@ rows.sort(function(a,b){var x=key(a),y=key(b),r;if(num.test(x)&&num.test(y))r=pa
 rows.forEach(function(r){tb.appendChild(r)});applyLimit(t)}
 $$('table.sortable').forEach(function(t){$$('th',t).forEach(function(th,i){th.tabIndex=0;th.addEventListener('click',function(){sortTable(t,i,th)});th.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();sortTable(t,i,th)}})})});
 $$('button.more').forEach(function(b){b.addEventListener('click',function(){var t=b.previousElementSibling&&b.previousElementSibling.querySelector('table');if(!t)return;var open=t.classList.toggle('open');applyLimit(t);b.textContent=open?'Show fewer':'Show all '+b.getAttribute('data-more')+' '+(b.getAttribute('data-label')||'rows')})});
-var state={status:'all',sev:'all',area:'all',q:''};
-function applyFilters(){var filtered=state.status!=='all'||state.sev!=='all'||state.area!=='all'||state.q!=='';
-$$('.finding').forEach(function(f){var ok=(state.status==='all'||f.getAttribute('data-status')===state.status)&&(state.sev==='all'||f.getAttribute('data-sev')===state.sev)&&(state.area==='all'||f.getAttribute('data-area')===state.area)&&(!state.q||f.textContent.toLowerCase().indexOf(state.q)>=0);f.hidden=!ok});
+var state={status:'all',sev:'all',area:'all',owner:'all',q:''};
+function applyFilters(){var filtered=state.status!=='all'||state.sev!=='all'||state.area!=='all'||state.owner!=='all'||state.q!=='';
+$$('.finding').forEach(function(f){var ok=(state.status==='all'||f.getAttribute('data-status')===state.status)&&(state.sev==='all'||f.getAttribute('data-sev')===state.sev)&&(state.area==='all'||f.getAttribute('data-area')===state.area)&&(state.owner==='all'||f.getAttribute('data-owner')===state.owner)&&(!state.q||f.textContent.toLowerCase().indexOf(state.q)>=0);f.hidden=!ok});
 $$('details.area').forEach(function(d){var n=$$('.finding:not([hidden])',d).length;d.hidden=n===0;var c=$('.vis',d);if(c)c.textContent=n;if(filtered&&n>0)d.open=true});
 var el=$('#visCount');if(el)el.textContent=$$('.finding:not([hidden])').length+' of '+$$('.finding').length+' findings shown'}
 $$('.chipbtn[data-k]').forEach(function(b){b.addEventListener('click',function(){var k=b.getAttribute('data-k');state[k]=b.getAttribute('data-v');$$('.chipbtn[data-k="'+k+'"]').forEach(function(x){x.classList.toggle('on',x===b)});applyFilters()})});
@@ -3605,7 +3618,7 @@ var q=$('#q');if(q)q.addEventListener('input',function(){state.q=q.value.toLower
 var af=$('#areaFilter');if(af)af.addEventListener('change',function(){state.area=af.value;applyFilters()});
 var ex=$('#expandAll');if(ex)ex.addEventListener('click',function(){$$('details.area').forEach(function(d){d.open=true})});
 var co=$('#collapseAll');if(co)co.addEventListener('click',function(){$$('details.area').forEach(function(d){d.open=false})});
-var rs=$('#resetFilters');if(rs)rs.addEventListener('click',function(){state={status:'all',sev:'all',area:'all',q:''};if(q)q.value='';if(af)af.value='all';$$('.chipbtn[data-k]').forEach(function(x){x.classList.toggle('on',x.getAttribute('data-v')==='all')});applyFilters()});
+var rs=$('#resetFilters');if(rs)rs.addEventListener('click',function(){state={status:'all',sev:'all',area:'all',owner:'all',q:''};if(q)q.value='';if(af)af.value='all';$$('.chipbtn[data-k]').forEach(function(x){x.classList.toggle('on',x.getAttribute('data-v')==='all')});applyFilters()});
 $$('a.perma').forEach(function(a){a.addEventListener('click',function(e){var url=location.href.split('#')[0]+a.getAttribute('href');if(navigator.clipboard&&navigator.clipboard.writeText){e.preventDefault();navigator.clipboard.writeText(url).then(function(){a.textContent='\u2713';setTimeout(function(){a.textContent='#'},1200)},function(){})}})});
 function openTarget(){var h=location.hash.slice(1);if(!h)return;var el=document.getElementById(h);if(!el)return;var d=el.closest('details');while(d){d.open=true;d=d.parentElement?d.parentElement.closest('details'):null}
 if(el.hidden){el.hidden=false}el.scrollIntoView({block:'center'});if(el.classList.contains('finding')){el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash')}}
@@ -4051,9 +4064,357 @@ function Get-LearnLinks {
         })
 }
 
+# ------------------------------------------------------------------ Owner routing: who fixes it and how much work it is
+# Every finding gets a suggested role and an effort level, so the report can be handed to the people who act on it.
+# Effort is one of: Quick win (a setting), Policy or process change, Project.
+# First matching rule wins; Title is an optional extra filter, so Title-specific rules come before the generic rule for the same Id.
+$OwnerRoles = @('Power Platform admin', 'Entra / identity admin', 'Security and compliance', 'Environment admin', 'Maker or asset owner', 'Governance lead')
+$OwnerRules = @(
+    @{ Id = '.'; Title = '^Check failed'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '.'; Title = '^Environment group rule:'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '.'; Title = '^Orphaned '; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^1\.3$'; Title = 'welcome content'; Role = 'Governance lead'; Effort = 'Policy or process change' }
+    @{ Id = '^1\.3$'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^1\.[67]$'; Role = 'Governance lead'; Effort = 'Policy or process change' }
+    @{ Id = '^2\.[12]$'; Role = 'Entra / identity admin'; Effort = 'Policy or process change' }
+    @{ Id = '^2\.3$'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^2\.4$'; Title = 'created by non-admins'; Role = 'Governance lead'; Effort = 'Policy or process change' }
+    @{ Id = '^2\.4$'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^2\.5$'; Title = 'Cross-tenant'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^2\.5$'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^2\.6$'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^3\.1$'; Title = 'renamed'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^3\.1$'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^3\.2$'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^3\.3$'; Role = 'Environment admin'; Effort = 'Policy or process change' }
+    @{ Id = '^3\.4$'; Role = 'Power Platform admin'; Effort = 'Project' }
+    @{ Id = '^3\.5$'; Role = 'Environment admin'; Effort = 'Policy or process change' }
+    @{ Id = '^3\.6$'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^3\.7$'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^3\.8$'; Role = 'Environment admin'; Effort = 'Quick win' }
+    @{ Id = '^3\.9$'; Role = 'Environment admin'; Effort = 'Policy or process change' }
+    @{ Id = '^4\.(3|7|12)$'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^4\.6$'; Title = 'HTTP'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^4\.'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^5\.1$'; Role = 'Entra / identity admin'; Effort = 'Policy or process change' }
+    @{ Id = '^5\.3$'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^5\.4$'; Role = 'Environment admin'; Effort = 'Policy or process change' }
+    @{ Id = '^5\.7$'; Title = 'Guests cannot create'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^5\.7$'; Title = 'Guest users present'; Role = 'Environment admin'; Effort = 'Policy or process change' }
+    @{ Id = '^5\.7$'; Role = 'Environment admin'; Effort = 'Quick win' }
+    @{ Id = '^5\.8$'; Title = 'Owner lookup'; Role = 'Entra / identity admin'; Effort = 'Quick win' }
+    @{ Id = '^5\.8$'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^6\.1$'; Role = 'Environment admin'; Effort = 'Policy or process change' }
+    @{ Id = '^6\.4$'; Title = 'Dataverse checks'; Role = 'Environment admin'; Effort = 'Quick win' }
+    @{ Id = '^6\.4$'; Role = 'Security and compliance'; Effort = 'Quick win' }
+    @{ Id = '^6\.5$'; Title = 'Who can read'; Role = 'Environment admin'; Effort = 'Policy or process change' }
+    @{ Id = '^6\.5$'; Role = 'Security and compliance'; Effort = 'Policy or process change' }
+    @{ Id = '^6\.6$'; Title = 'IP firewall'; Role = 'Environment admin'; Effort = 'Policy or process change' }
+    @{ Id = '^6\.6$'; Role = 'Environment admin'; Effort = 'Quick win' }
+    @{ Id = '^6\.7$'; Role = 'Power Platform admin'; Effort = 'Project' }
+    @{ Id = '^6\.8$'; Role = 'Security and compliance'; Effort = 'Project' }
+    @{ Id = '^6\.9$'; Role = 'Environment admin'; Effort = 'Quick win' }
+    @{ Id = '^7\.[126]$'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^7\.4$'; Title = 'inventory'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^7\.4$'; Role = 'Maker or asset owner'; Effort = 'Policy or process change' }
+    @{ Id = '^7\.5$'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^7\.9$'; Title = 'creation limited|non-production'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^7\.9$'; Role = 'Maker or asset owner'; Effort = 'Policy or process change' }
+    @{ Id = '^8\.1$'; Title = 'inventory'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^8\.1$'; Title = 'default environment'; Role = 'Maker or asset owner'; Effort = 'Project' }
+    @{ Id = '^8\.1$'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^8\.2$'; Title = 'definition scan'; Role = 'Environment admin'; Effort = 'Quick win' }
+    @{ Id = '^8\.2$'; Role = 'Maker or asset owner'; Effort = 'Quick win' }
+    @{ Id = '^8\.3$'; Role = 'Maker or asset owner'; Effort = 'Policy or process change' }
+    @{ Id = '^8\.6$'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^8\.8$'; Role = 'Maker or asset owner'; Effort = 'Quick win' }
+    @{ Id = '^9\.1$'; Title = '^Copilot Studio agent'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^9\.1$'; Title = '^Agent access control'; Role = 'Environment admin'; Effort = 'Quick win' }
+    @{ Id = '^9\.4$'; Title = 'sharing limits'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^9\.[1-5]$'; Role = 'Maker or asset owner'; Effort = 'Quick win' }
+    @{ Id = '^9\.6$'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^9\.[79]$'; Role = 'Maker or asset owner'; Effort = 'Policy or process change' }
+    @{ Id = '^10\.1$'; Role = 'Governance lead'; Effort = 'Policy or process change' }
+    @{ Id = '^10\.'; Role = 'Maker or asset owner'; Effort = 'Quick win' }
+    @{ Id = '^11\.1$'; Role = 'Governance lead'; Effort = 'Policy or process change' }
+    @{ Id = '^11\.2$'; Title = 'Computer use'; Role = 'Environment admin'; Effort = 'Quick win' }
+    @{ Id = '^11\.[234]$'; Role = 'Maker or asset owner'; Effort = 'Policy or process change' }
+    @{ Id = '^11\.[58]$'; Title = 'Connected agents and code interpreter'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^11\.[58]$'; Role = 'Security and compliance'; Effort = 'Policy or process change' }
+    @{ Id = '^12\.'; Role = 'Maker or asset owner'; Effort = 'Quick win' }
+    @{ Id = '^13\.'; Title = 'Production environments'; Role = 'Environment admin'; Effort = 'Policy or process change' }
+    @{ Id = '^13\.'; Role = 'Maker or asset owner'; Effort = 'Project' }
+    @{ Id = '^14\.1$'; Title = 'management settings'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^14\.1$'; Role = 'Security and compliance'; Effort = 'Quick win' }
+    @{ Id = '^14\.3$'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^14\.'; Role = 'Governance lead'; Effort = 'Policy or process change' }
+    @{ Id = '^15\.3$'; Title = 'Storage warning'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^15\.'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^16\.1$'; Title = 'Model data sharing'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^16\.'; Role = 'Security and compliance'; Effort = 'Policy or process change' }
+    @{ Id = '^17\.6$'; Role = 'Maker or asset owner'; Effort = 'Project' }
+    @{ Id = '^17\.'; Role = 'Power Platform admin'; Effort = 'Policy or process change' }
+    @{ Id = '^18\.1$'; Role = 'Power Platform admin'; Effort = 'Quick win' }
+    @{ Id = '^18\.7$'; Role = 'Maker or asset owner'; Effort = 'Quick win' }
+    @{ Id = '^18\.(6|9|10)$'; Role = 'Governance lead'; Effort = 'Policy or process change' }
+    @{ Id = '^18\.'; Role = 'Maker or asset owner'; Effort = 'Policy or process change' }
+)
+# Used only when no rule above matches (a new check that has no rule yet), so no finding is ever left without an owner.
+$OwnerTopicDefault = @{
+    1 = 'Governance lead'; 2 = 'Power Platform admin'; 3 = 'Environment admin'; 4 = 'Power Platform admin'; 5 = 'Entra / identity admin'; 6 = 'Environment admin'
+    7 = 'Maker or asset owner'; 8 = 'Maker or asset owner'; 9 = 'Maker or asset owner'; 10 = 'Maker or asset owner'; 11 = 'Maker or asset owner'; 12 = 'Maker or asset owner'
+    13 = 'Maker or asset owner'; 14 = 'Security and compliance'; 15 = 'Power Platform admin'; 16 = 'Security and compliance'; 17 = 'Governance lead'; 18 = 'Governance lead'
+}
+
+function Get-OwnerRoute {
+    param($F)
+    foreach ($r in $OwnerRules) {
+        if ([string]$F.Id -notmatch $r.Id) { continue }
+        if ($r.ContainsKey('Title') -and [string]$F.Title -notmatch $r.Title) { continue }
+        return [pscustomobject]@{ Role = [string]$r.Role; Effort = [string]$r.Effort }
+    }
+    $role = if ($OwnerTopicDefault.ContainsKey([int]$F.Topic)) { $OwnerTopicDefault[[int]$F.Topic] } else { 'Power Platform admin' }
+    return [pscustomobject]@{ Role = $role; Effort = 'Policy or process change' }
+}
+
+# ------------------------------------------------------------------ Hand-off: owner outreach and tracker import files
+# Which owner to contact: the owner lookup in Test-Owners fills OwnerNames, OwnerUpns and OwnerState (Deleted or Disabled).
+$script:OwnerUpns = @{}
+$script:OwnerState = @{}
+$script:OwnerCandidates = @()
+$script:HandoffEnabled = -not $SkipHandoff
+
+# What to ask an owner for each kind of reason. First matches win; an empty action means the owner status covers it.
+$OutreachActions = @(
+    @{ Match = 'Owner account|No owner reported'; Action = '' }
+    @{ Match = 'No authentication|without sign-in'; Action = 'require sign-in (Authenticate with Microsoft or Entra ID) or unpublish the agent' }
+    @{ Match = 'hard-coded secret'; Action = 'remove the secret, store it in Key Vault and rotate it' }
+    @{ Match = 'Maker credentials|as the maker'; Action = 'switch tools to end-user credentials or document the exception' }
+    @{ Match = 'entire tenant|Everyone'; Action = 'share with a security group instead of the whole tenant' }
+    @{ Match = 'other Microsoft Entra tenants'; Action = 'turn off multitenant access unless there is a documented need' }
+    @{ Match = 'sign-in only when'; Action = 'ask users to sign in up front' }
+    @{ Match = 'open channel|external channel|Open web'; Action = 'confirm the website or external channels are intended and require sign-in' }
+    @{ Match = 'Autonomous|HTTP'; Action = 'review the triggers and HTTP requests and the identity the agent runs as' }
+    @{ Match = 'MCP|Bot Service|External-service connector'; Action = 'confirm the external connectors, MCP actions and skills are approved' }
+    @{ Match = 'co-authors'; Action = 'trim co-authors to the people who need edit access' }
+    @{ Match = 'Public website|Web search|General model knowledge'; Action = 'confirm the public and web knowledge sources are approved' }
+    @{ Match = 'content moderation'; Action = 'raise content moderation' }
+    @{ Match = 'Never published|Not published|Not modified'; Action = 'confirm it is still needed and archive or delete it if not' }
+)
+
+# Apps and flows that are dormant or have no owner. Test-Owners only keeps the orphaned ones, so these are saved while the inventory is at hand.
+function Get-OwnerCandidate {
+    param($Apps, $Flows, $EnvMap)
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($set in @(@{ Kind = 'App'; Items = $Apps }, @{ Kind = 'Flow'; Items = $Flows })) {
+        foreach ($r in @($set.Items)) {
+            $owner = [string](Get-Prop $r 'properties.ownerId' '')
+            $days = Get-DaysSince (Get-Prop $r 'properties.lastModifiedAt' '')
+            $reasons = New-Object System.Collections.ArrayList
+            if (-not $owner) { [void]$reasons.Add('No owner reported') }
+            if ($days -gt $StaleDays) { [void]$reasons.Add("Not modified for $days days (may be dormant)") }
+            if ($reasons.Count -eq 0) { continue }
+            $envId = [string](Get-Prop $r 'properties.environmentId' '')
+            [void]$rows.Add([pscustomobject]@{ Kind = $set.Kind; Name = [string](Get-Prop $r 'properties.displayName' $r.name); OwnerId = $owner; EnvId = $envId; Environment = (Get-EnvLabel $EnvMap $envId); Reasons = @($reasons) })
+        }
+    }
+    return $rows.ToArray()
+}
+
+# Deleted or Disabled come from the owner lookup; Active means the lookup found the account; Not checked means Graph owner lookup did not run.
+function Get-OwnerStatus {
+    param([string]$OwnerId)
+    if (-not $OwnerId) { return 'No owner reported' }
+    $k = $OwnerId.ToLower()
+    if ($script:OwnerState.ContainsKey($k)) { return [string]$script:OwnerState[$k] }
+    if ($script:OwnerNames.Count -eq 0) { return 'Not checked' }
+    return 'Active'
+}
+
+function Add-OutreachReason {
+    param($Assets, [string]$Key, [string]$Kind, [string]$Name, [string]$Environment, [string]$OwnerId, [string]$Priority, [string]$Reason)
+    if (-not $Assets.ContainsKey($Key)) {
+        $Assets[$Key] = [pscustomobject]@{ Kind = $Kind; Name = $Name; Environment = $Environment; OwnerId = $OwnerId; Priority = 'Low'; Reasons = (New-Object System.Collections.ArrayList) }
+    }
+    $a = $Assets[$Key]
+    if ($Reason -and -not $a.Reasons.Contains($Reason)) { [void]$a.Reasons.Add($Reason) }
+    $want = [array]::IndexOf($SeverityOrder, $Priority)
+    if ($want -ge 0 -and $want -lt [array]::IndexOf($SeverityOrder, $a.Priority)) { $a.Priority = $Priority }
+}
+
+# One row per owner with the assets that need attention. Assets with no usable owner (none reported, or the account was deleted)
+# are grouped under one clearly labeled "No owner" row, because there is nobody to notify.
+function Get-OwnerOutreach {
+    param($AgentRisk)
+    $assets = @{}
+    $riskById = @{}
+    foreach ($r in @($AgentRisk)) { if ($r.AgentId) { $riskById[([string]$r.AgentId).ToLower()] = $r } }
+    foreach ($a in @($script:AgentView)) {
+        $id = ([string]$a.Id).ToLower()
+        $key = "agent|$id"
+        $owner = [string]$a.Owner
+        $risk = $riskById[$id]
+        # Medium rating (15 points) and above; lower-rated agents only appear for ownership or lifecycle reasons.
+        if ($risk -and [int]$risk.RiskScore -ge 15) {
+            foreach ($s in @(([string]$risk.Signals) -split '; ' | Where-Object { $_ -and $_ -ne 'Owner deleted or disabled' })) {
+                Add-OutreachReason -Assets $assets -Key $key -Kind 'Agent' -Name $a.Agent -Environment $a.Environment -OwnerId $owner -Priority $risk.Rating -Reason $s
+            }
+        }
+        if (-not $owner) { Add-OutreachReason -Assets $assets -Key $key -Kind 'Agent' -Name $a.Agent -Environment $a.Environment -OwnerId $owner -Priority 'High' -Reason 'No owner reported' }
+        if (-not $a.LastPublished -and (Get-DaysSince $a.Created) -gt 90) { Add-OutreachReason -Assets $assets -Key $key -Kind 'Agent' -Name $a.Agent -Environment $a.Environment -OwnerId $owner -Priority 'Low' -Reason 'Never published and older than 90 days' }
+        elseif ($a.LastPublished -and (Get-DaysSince $a.LastPublished) -gt $StaleDays) { Add-OutreachReason -Assets $assets -Key $key -Kind 'Agent' -Name $a.Agent -Environment $a.Environment -OwnerId $owner -Priority 'Low' -Reason "Not published for $(Get-DaysSince $a.LastPublished) days" }
+    }
+    foreach ($o in @($script:OrphanedAssets)) {
+        $oid = [string]$o.Owner
+        $key = if ($o.Kind -eq 'Agent' -and $o.Id) { 'agent|' + ([string]$o.Id).ToLower() } else { ("$($o.Kind)|$oid|$($o.Env)|$($o.Name)").ToLower() }
+        $reason = if ((Get-OwnerStatus $oid) -eq 'Disabled') { 'Owner account is disabled' } else { 'Owner account was deleted' }
+        Add-OutreachReason -Assets $assets -Key $key -Kind $o.Kind -Name $o.Name -Environment (Get-EnvLabel $script:EnvMap $o.Env) -OwnerId $oid -Priority 'High' -Reason $reason
+    }
+    foreach ($c in @($script:OwnerCandidates)) {
+        $key = ("$($c.Kind)|$($c.OwnerId)|$($c.EnvId)|$($c.Name)").ToLower()
+        foreach ($reason in @($c.Reasons)) {
+            Add-OutreachReason -Assets $assets -Key $key -Kind $c.Kind -Name $c.Name -Environment $c.Environment -OwnerId $c.OwnerId -Priority $(if ($reason -like 'No owner*') { 'High' } else { 'Low' }) -Reason $reason
+        }
+    }
+
+    $groups = @{}
+    foreach ($a in $assets.Values) {
+        if ($a.Reasons.Count -eq 0) { continue }
+        $gk = if ((Get-OwnerStatus $a.OwnerId) -in @('No owner reported', 'Deleted')) { 'no-owner' } else { ([string]$a.OwnerId).ToLower() }
+        if (-not $groups.ContainsKey($gk)) { $groups[$gk] = New-Object System.Collections.ArrayList }
+        [void]$groups[$gk].Add($a)
+    }
+    $assetCap = 25
+    $rows = foreach ($gk in @($groups.Keys)) {
+        $list = @($groups[$gk] | Sort-Object @{ Expression = { [array]::IndexOf($SeverityOrder, $_.Priority) } }, Kind, Name)
+        $noOwner = ($gk -eq 'no-owner')
+        $ownerId = [string]$list[0].OwnerId
+        $status = if ($noOwner) { 'No owner' } else { Get-OwnerStatus $ownerId }
+        $label = if ($noOwner) { 'No owner' } else { Resolve-OwnerLabel $ownerId }
+        $upn = ''
+        if (-not $noOwner) {
+            $upn = [string]$script:OwnerUpns[$ownerId.ToLower()]
+            if (-not $upn -and $label -match '^[^@\s]+@[^@\s]+$') { $upn = $label }
+        }
+        $reasonCount = @{}
+        foreach ($a in $list) { foreach ($rs in $a.Reasons) { $reasonCount[$rs] = 1 + [int]$reasonCount[$rs] } }
+        $reasonText = (@($reasonCount.Keys | Sort-Object @{ Expression = { $reasonCount[$_] }; Descending = $true }, @{ Expression = { $_ } } | Select-Object -First 12 | ForEach-Object { if ($reasonCount[$_] -gt 1) { "$_ (x$($reasonCount[$_]))" } else { $_ } })) -join '; '
+        $lines = New-Object System.Collections.ArrayList
+        $len = 0
+        foreach ($a in $list) {
+            $where = if ($a.Environment) { " [$($a.Environment)]" } else { '' }
+            $line = "$($a.Kind): $($a.Name)$where - $($a.Reasons -join '; ')"
+            if ($lines.Count -ge $assetCap -or ($len + $line.Length) -gt 30000) { break }
+            [void]$lines.Add($line)
+            $len += $line.Length + 3
+        }
+        $assetText = $lines -join ' | '
+        if ($list.Count -gt $lines.Count) { $assetText += " | (+$($list.Count - $lines.Count) more assets not listed here; the counts in this row cover all of them)" }
+        $asks = New-Object System.Collections.ArrayList
+        foreach ($rule in $OutreachActions) {
+            if (-not $rule.Action) { continue }
+            if (@($reasonCount.Keys | Where-Object { $_ -match $rule.Match }).Count -gt 0 -and -not $asks.Contains($rule.Action)) { [void]$asks.Add($rule.Action) }
+        }
+        $todo = if ($asks.Count -gt 0) { (@($asks | Select-Object -First 5) -join '; ') + '.' } else { 'review the flagged items.' }
+        $action = switch ($status) {
+            'No owner' { "Nobody to notify: assign an owner to each asset (or retire it), then ask the new owner to $todo" }
+            'Disabled' { "The owner account is disabled: ask their manager to nominate a new owner and reassign these assets, then ask the new owner to $todo" }
+            'Not checked' { "Owner status was not checked (the Microsoft Graph owner lookup did not run). Confirm the owner is still active, then ask them to $todo" }
+            default { "Contact the owner and ask them to $todo" }
+        }
+        [pscustomobject][ordered]@{
+            Owner = $label; Contact = $upn; OwnerStatus = $status; HighestRisk = $list[0].Priority; AtRiskAssets = $list.Count
+            Agents = @($list | Where-Object Kind -eq 'Agent').Count; Apps = @($list | Where-Object Kind -eq 'App').Count; Flows = @($list | Where-Object Kind -eq 'Flow').Count
+            Environments = (@($list | ForEach-Object { $_.Environment } | Where-Object { $_ } | Sort-Object -Unique) -join '; ')
+            Reasons = $reasonText; Assets = $assetText; RecommendedAction = $action; OwnerId = $(if ($noOwner) { '' } else { $ownerId })
+        }
+    }
+    return @($rows | Sort-Object @{ Expression = { [array]::IndexOf($SeverityOrder, $_.HighestRisk) } }, @{ Expression = 'AtRiskAssets'; Descending = $true }, Owner)
+}
+
+# Tracker files are ASCII-safe: typographic punctuation becomes plain punctuation.
+function ConvertTo-AsciiText {
+    param([string]$Text)
+    if (-not $Text) { return '' }
+    return $Text.Replace([string][char]0x2018, "'").Replace([string][char]0x2019, "'").Replace([string][char]0x201C, '"').Replace([string][char]0x201D, '"').Replace([string][char]0x2013, '-').Replace([string][char]0x2014, '-').Replace([string][char]0x2026, '...').Replace([string][char]0x00A0, ' ')
+}
+
+# Tags and labels cannot hold spaces in Jira, so every value is reduced to letters, digits and hyphens.
+function ConvertTo-TagText {
+    param([string]$Text)
+    return (([string]$Text -replace '[^A-Za-z0-9]+', '-').Trim('-'))
+}
+
+# One work item per open (Fail or Warning) action, in priority order, for Azure DevOps and Jira CSV import.
+# Work Item Type and Issue Type are Task, which exists in every Azure DevOps process and Jira project type. Severity text is in Tags or Labels and in the description,
+# because the Severity field exists only on some Azure DevOps work item types and an unknown column would stop the import.
+function Export-WorkItem {
+    param([string]$Dir, $Actions)
+    $open = @($Actions | Where-Object { $_.Finding.Status -in @('Fail', 'Warning') })
+    if ($open.Count -eq 0) { return }
+    $adoPriority = @{ Critical = 1; High = 2; Medium = 3; Low = 4 }
+    $jiraPriority = @{ Critical = 'Highest'; High = 'High'; Medium = 'Medium'; Low = 'Low' }
+    $ado = New-Object System.Collections.ArrayList
+    $jira = New-Object System.Collections.ArrayList
+    foreach ($e in $open) {
+        $f = $e.Finding
+        $route = Get-OwnerRoute $f
+        $why = ConvertTo-AsciiText (Get-WhyText $f)
+        $found = ConvertTo-AsciiText $(if ($f.Value) { $f.Value } else { $f.Detail })
+        $rec = ConvertTo-AsciiText $f.Recommendation
+        $links = @(Get-LearnLinks $f)
+        $related = @($e.Related | Select-Object -Skip 1)
+        $title = ConvertTo-AsciiText "PPCS $($f.Id): $($f.Title)"
+        if ($title.Length -gt 250) { $title = $title.Substring(0, 247) + '...' }
+        $statusText = if ($f.Status -eq 'Fail') { 'Fail' } else { 'Warning' }
+
+        $h = New-Object System.Text.StringBuilder
+        [void]$h.Append("<p><b>Severity:</b> $(Format-Html $f.Severity) ($statusText) &middot; <b>Check:</b> $(Format-Html $f.Id) &middot; <b>Area:</b> $(Format-Html (ConvertTo-AsciiText $f.TopicName))</p>")
+        if ($found) { [void]$h.Append("<p><b>What we found:</b> $(Format-Html $found)</p>") }
+        if ($rec) { [void]$h.Append("<p><b>Recommended action:</b> $(Format-Html $rec)</p>") }
+        if ($why) { [void]$h.Append("<p><b>Why:</b> $(Format-Html $why)</p>") }
+        [void]$h.Append("<p><b>Suggested owner:</b> $(Format-Html $route.Role) &middot; <b>Effort:</b> $(Format-Html $route.Effort)</p>")
+        if ($related.Count -gt 0) { [void]$h.Append("<p><b>Also counted in:</b> $(Format-Html ($related -join ', '))</p>") }
+        if ($links.Count -gt 0) { [void]$h.Append('<p><b>Microsoft Learn:</b> ' + ((@($links | ForEach-Object { "<a href='$(Format-Html $_.Url)'>$(Format-Html $_.Title)</a>" })) -join '; ') + '</p>') }
+        $tags = @('PPCS', "Severity-$($f.Severity)", "Area-$($f.Topic)", "Owner-$(ConvertTo-TagText $route.Role)", "Effort-$(ConvertTo-TagText $route.Effort)")
+        [void]$ado.Add([pscustomobject][ordered]@{ 'Work Item Type' = 'Task'; Title = $title; Description = $h.ToString(); Priority = $adoPriority[[string]$f.Severity]; Tags = ($tags -join '; ') })
+
+        $t = New-Object System.Collections.ArrayList
+        [void]$t.Add("Severity: $($f.Severity) ($statusText)  |  Check: $($f.Id)  |  Area: $(ConvertTo-AsciiText $f.TopicName)")
+        if ($found) { [void]$t.Add("What we found: $found") }
+        if ($rec) { [void]$t.Add("Recommended action: $rec") }
+        if ($why) { [void]$t.Add("Why: $why") }
+        [void]$t.Add("Suggested owner: $($route.Role)  |  Effort: $($route.Effort)")
+        if ($related.Count -gt 0) { [void]$t.Add("Also counted in: $($related -join ', ')") }
+        if ($links.Count -gt 0) { [void]$t.Add("Microsoft Learn:`n" + ((@($links | ForEach-Object { "- $($_.Title): $($_.Url)" })) -join "`n")) }
+        [void]$jira.Add([pscustomobject][ordered]@{
+                Summary = $title; 'Issue Type' = 'Task'; Priority = $jiraPriority[[string]$f.Severity]; Description = ($t -join "`n`n")
+                Labels = 'PPCS'; Labels2 = $tags[1]; Labels3 = $tags[3]; Labels4 = $tags[4]
+            })
+    }
+    Export-SafeCsv -Rows $ado.ToArray() -Path (Join-Path $Dir 'workitems-azure-devops.csv')
+    $jiraPath = Join-Path $Dir 'workitems-jira.csv'
+    Export-SafeCsv -Rows $jira.ToArray() -Path $jiraPath
+    # Jira reads several Labels columns of the same name as several labels, so the numbered names are only needed to build the rows.
+    $jt = [System.IO.File]::ReadAllText($jiraPath)
+    $eol = $jt.IndexOf("`n")
+    [System.IO.File]::WriteAllText($jiraPath, (($jt.Substring(0, $eol) -replace '"Labels[0-9]"', '"Labels"') + $jt.Substring($eol)), (New-Object System.Text.UTF8Encoding($true)))
+}
+
+function Export-Handoff {
+    param([string]$Dir, $Actions, $AgentRisk)
+    try {
+        $outreach = @(Get-OwnerOutreach -AgentRisk $AgentRisk)
+        if ($outreach.Count -gt 0) { Export-SafeCsv -Rows $outreach -Path (Join-Path $Dir 'owner-outreach.csv') }
+        Export-WorkItem -Dir $Dir -Actions $Actions
+    }
+    catch { Add-Limitation 'Hand-off exports' "owner-outreach.csv and the work-item import files could not be written: $($_.Exception.Message)" }
+}
+
 function Format-FindingCard {
     param($F)
     $actionable = $F.Status -in @('Fail', 'Warning', 'Unavailable', 'Accepted')
+    $route = Get-OwnerRoute $F
     $cl = $script:Checklist[$F.Id]
     $confLabel = switch ($F.Confidence) { 'Configuration' { 'Configuration' } 'Sample' { 'Sample' } 'Heuristic' { 'Heuristic' } 'NotVerified' { 'Not verified' } default { [string]$F.Confidence } }
     $confTitle = switch ($F.Confidence) {
@@ -4064,7 +4425,7 @@ function Format-FindingCard {
         default { '' }
     }
     $sb = New-Object System.Text.StringBuilder
-    [void]$sb.Append("<article class='finding st-$($F.Status)' id='f-$($F.Key)' data-status='$($F.Status)' data-sev='$($F.Severity)' data-area='$($F.Topic)'><header class='f-top'>")
+    [void]$sb.Append("<article class='finding st-$($F.Status)' id='f-$($F.Key)' data-status='$($F.Status)' data-sev='$($F.Severity)' data-area='$($F.Topic)' data-owner='$(Format-Html $route.Role)'><header class='f-top'>")
     [void]$sb.Append((Format-StatusChip $F.Status))
     if ($actionable) { [void]$sb.Append((Format-SeverityChip $F.Severity)) }
     [void]$sb.Append("<span class='fid'>$(Format-Html $F.Id)</span><h3 class='ft'>$(Format-Html $F.Title)</h3><span class='ctag c-$($F.Confidence)' title='$(Format-Html $confTitle)'>$(Format-Html $confLabel)</span><a class='perma' href='#f-$($F.Key)' title='Copy link to this finding' aria-label='Copy link to this finding'>#</a></header>")
@@ -4088,7 +4449,7 @@ function Format-FindingCard {
     if ($hasRec) {
         $whyCard = Get-WhyText $F
         $whyHtml = if ($whyCard) { "<p class='why'><b>Why:</b> $(Format-Html $whyCard)</p>" } else { '' }
-        [void]$sb.Append("<div><div class='lbl'>Recommended action</div><p>$(Format-Html $F.Recommendation)</p>$whyHtml</div>")
+        [void]$sb.Append("<div><div class='lbl'>Recommended action</div><p>$(Format-Html $F.Recommendation)</p>$whyHtml<p class='route'><b>Suggested owner:</b> $(Format-Html $route.Role) &middot; <b>Effort:</b> $(Format-Html $route.Effort)</p></div>")
     }
     [void]$sb.Append('</div>')
     if ($F.EvidenceCount -gt 0) {
@@ -4137,6 +4498,7 @@ function Write-Report {
     # ---- machine-readable exports (existing columns first, new columns appended)
     $props = @('Key', 'Id', 'Topic', 'TopicName', 'Title', 'Status', 'Severity', 'Value', 'Detail', 'Recommendation', 'Source', 'EvidenceCount', 'EvidenceFile') +
     @(@{ Name = 'Confidence'; Expression = { $_.Confidence } }, @{ Name = 'AlsoCovers'; Expression = { @($_.AlsoCovers) -join '; ' } }, @{ Name = 'RollupKey'; Expression = { $_.RollupKey } }, @{ Name = 'LearnLinks'; Expression = { (@(Get-LearnLinks $_) | ForEach-Object { $_.Url }) -join '; ' } }, @{ Name = 'Why'; Expression = { Get-WhyText $_ } }, @{ Name = 'AcceptedFrom'; Expression = { $_.AcceptedFrom } }, @{ Name = 'AcceptedReason'; Expression = { if ($_.Acceptance) { $_.Acceptance.Reason } else { '' } } }, @{ Name = 'AcceptedOwner'; Expression = { if ($_.Acceptance) { $_.Acceptance.Owner } else { '' } } }, @{ Name = 'AcceptedApprovedBy'; Expression = { if ($_.Acceptance) { $_.Acceptance.ApprovedBy } else { '' } } }, @{ Name = 'AcceptedExpires'; Expression = { if ($_.Acceptance) { $_.Acceptance.Expires } else { '' } } })
+    $props += @(@{ Name = 'OwnerRole'; Expression = { (Get-OwnerRoute $_).Role } }, @{ Name = 'Effort'; Expression = { (Get-OwnerRoute $_).Effort } })
     $flat = @($script:Findings | Select-Object -Property $props)
     Export-SafeCsv -Rows $flat -Path (Join-Path $Dir 'findings.csv')
     ConvertTo-Json -InputObject $flat -Depth 4 | Out-File -FilePath (Join-Path $Dir 'findings.json') -Encoding UTF8
@@ -4161,14 +4523,17 @@ function Write-Report {
     foreach ($e in @($actions | Where-Object { $_.Finding.Status -in @('Fail', 'Warning') })) {
         $n++
         $f = $e.Finding
+        $route = Get-OwnerRoute $f
         $areaTxt = (@($f.Topic) + @(@($f.AlsoCovers) | ForEach-Object { ([string]$_).Split('.')[0] }) | Where-Object { $_ } | Select-Object -Unique) -join ' / '
         $evTxt = $f.Source + $(if ($f.EvidenceFile) { '; ' + $f.EvidenceFile } else { '' })
         [void]$register.Add([pscustomobject][ordered]@{
                 'ID' = ('F-{0:D2}' -f $n); 'Area' = $areaTxt; 'Finding' = ((@($f.Title, $f.Value) | Where-Object { $_ }) -join ': '); 'Evidence' = $evTxt
                 'Risk' = $f.Severity; 'Recommendation' = $f.Recommendation; 'Owner / date' = ''; 'Status' = $f.Status; 'Check' = $f.Id; 'Finding key' = $f.Key
+                'Suggested owner' = $route.Role; 'Effort' = $route.Effort
             })
     }
     if ($register.Count -gt 0) { Export-SafeCsv -Rows $register.ToArray() -Path (Join-Path $Dir 'findings-register.csv') }
+    if ($script:HandoffEnabled) { Export-Handoff -Dir $Dir -Actions $actions -AgentRisk $agentRisk }
     if ($agentRisk.Count -gt 0) { Export-SafeCsv -Rows ($agentRisk | Select-Object Agent, Environment, Owner, Authentication, Channels, Published, RiskScore, Rating, Signals, Credits30d, OwnerId, AgentId, EnvironmentId) -Path (Join-Path $Dir 'agent-risk-register.csv') }
     if ($envProfile.Count -gt 0) { Export-SafeCsv -Rows ($envProfile | Select-Object Environment, Type, Managed, Group, SecurityGroup, Geo, Retention, State, Apps, Flows, Agents, Sites, ConversationAudit, DataverseAudit, SystemAdmins, RiskScore, Rating, Flags, EnvironmentId) -Path (Join-Path $Dir 'environment-profile.csv') }
     $exSummary = $null
@@ -4199,7 +4564,7 @@ function Write-Report {
             MaxFlowDefinitionsPerEnvironment = $MaxFlowDefinitionsPerEnvironment; MaxEntitlementEnvironments = $MaxEntitlementEnvironments; FlowRunSampleLimit = $FlowRunSampleLimit
             MaxAppSharingEnvironments = $MaxAppSharingEnvironments; DefaultEnvironmentAssetWarnThreshold = $DefaultEnvironmentAssetWarnThreshold
             DeveloperEnvironmentDeadline = $DeveloperEnvironmentDeadline.ToString('yyyy-MM-dd'); SkipLegacyApis = [bool]$SkipLegacyApis; SkipEntra = [bool]$SkipEntra
-            SkipDataverse = [bool]$SkipDataverse; SkipUsage = [bool]$SkipUsage; SkipDeepScan = [bool]$SkipDeepScan; ChecklistSource = $script:ChecklistSource
+            SkipDataverse = [bool]$SkipDataverse; SkipUsage = [bool]$SkipUsage; SkipDeepScan = [bool]$SkipDeepScan; SkipHandoff = [bool]$SkipHandoff; ChecklistSource = $script:ChecklistSource
             PowerPlatformApiHost = $PowerPlatformApiHost; BapApiHost = $BapApiHost; GraphHost = $GraphHost; ExceptionsFile = $(if ($ExceptionsPath) { [System.IO.Path]::GetFileName($ExceptionsPath) } else { '' })
         }
     }
@@ -4378,6 +4743,8 @@ function Get-HtmlSummary {
         $actHtml = if ($act) { "<div class='a'>$(Format-Html $act)</div>" } else { '' }
         $whyTxt = Get-WhyText $f
         if ($act -and $whyTxt) { $actHtml += "<div class='w'>$(Format-Html $whyTxt)</div>" }
+        $fixRoute = Get-OwnerRoute $f
+        $actHtml += "<div class='rt'><b>Suggested owner:</b> $(Format-Html $fixRoute.Role) &middot; <b>Effort:</b> $(Format-Html $fixRoute.Effort)</div>"
         $fix += "<li><span class='n'>$rank</span><div><div class='t'>$(Format-StatusChip $f.Status) $(Format-SeverityChip $f.Severity) <a href='#f-$($f.Key)'>$(Format-Html $f.Title)</a> <span class='fid'>$(Format-Html $f.Id)</span>$related</div><div class='v'>$(Format-Html $val)</div>$actHtml</div></li>"
     }
     $fixHtml = if ($fix) { "<ol class='fixlist'>$fix</ol><p class='small' style='margin-top:10px'>$(@($M.Actions).Count) item(s) need action or verification. The roadmap below groups all of them.</p>" } else { '<p>No open gaps were found by the automated checks.</p>' }
@@ -4482,7 +4849,8 @@ function Get-HtmlRoadmap {
             $f = $e.Finding
             $verify = if ($f.Status -eq 'Unavailable') { 'Verify: ' } else { '' }
             $also = if (@($e.Related).Count -gt 1) { " <span class='small'>(+$(@($e.Related).Count - 1) related)</span>" } else { '' }
-            "<li><div><span class='id'>$(Format-Html $f.Id)</span><a href='#f-$($f.Key)'>$verify$(Format-Html $f.Title)</a>$also</div>$(Format-StatusChip $f.Status)</li>"
+            $rt = Get-OwnerRoute $f
+            "<li><div><span class='id'>$(Format-Html $f.Id)</span><a href='#f-$($f.Key)'>$verify$(Format-Html $f.Title)</a>$also<div class='rt'>$(Format-Html $rt.Role) &middot; $(Format-Html $rt.Effort)</div></div>$(Format-StatusChip $f.Status)</li>"
         }
         $li = @($li)
         $body = if ($li.Count -eq 0) { "<p class='small'>Nothing in this window.</p>" } else { '<ul>' + (($li | Select-Object -First 6) -join '') + '</ul>' }
@@ -4491,7 +4859,8 @@ function Get-HtmlRoadmap {
     }
     $critManual = @($M.Manual | Where-Object { $_.Priority -eq 'Critical' }).Count
     $manualNote = if (@($M.Manual).Count -gt 0) { " Plan time for the <a href='#manual'>$(@($M.Manual).Count) manual checklist item(s)</a> too, $critManual of them Critical." } else { '' }
-    return "<section class='panel' id='roadmap'><h2>Suggested 30/60/90-day roadmap</h2><p class='lead'>Open findings placed by severity and status: Critical goes to Contain, High and medium gaps to Standardize, the rest to later windows. Adjust each item for the customer's likelihood and impact.$manualNote</p><div class='road'>$cols</div><p class='small'>Planning agent governance fixes? The independent $(Get-NavigatorLink) can help you pick the Microsoft tools and admin centers for each area.</p></section>"
+    $handoffNote = if ($script:HandoffEnabled) { ' To hand the work over, use owner-outreach.csv (who to notify) and workitems-azure-devops.csv or workitems-jira.csv (tracker import) in the report folder.' } else { '' }
+    return "<section class='panel' id='roadmap'><h2>Suggested 30/60/90-day roadmap</h2><p class='lead'>Open findings placed by severity and status: Critical goes to Contain, High and medium gaps to Standardize, the rest to later windows. Each item names the role best placed to fix it and how much work it is. Adjust each item for the customer's likelihood and impact.$manualNote$handoffNote</p><div class='road'>$cols</div><p class='small'>Planning agent governance fixes? The independent $(Get-NavigatorLink) can help you pick the Microsoft tools and admin centers for each area.</p></section>"
 }
 
 function Get-HtmlAcceptedRisk {
@@ -4632,6 +5001,10 @@ function Get-HtmlFindings {
     foreach ($p in @(@('Fail', 'Fail'), @('Warning', 'Warning'), @('Unavailable', 'Not verified'), @('Accepted', 'Accepted risk'), @('Pass', 'Pass'), @('Info', 'Info'))) { if ($p[0] -eq 'Accepted' -and [int]$c['Accepted'] -eq 0) { continue }; [void]$sb.Append("<button type='button' class='chipbtn' data-k='status' data-v='$($p[0])'>$($p[1]) <span>$($c[$p[0]])</span></button>") }
     [void]$sb.Append("</div><div><label>Severity</label><button type='button' class='chipbtn on' data-k='sev' data-v='all'>All</button>")
     foreach ($s in $SeverityOrder) { [void]$sb.Append("<button type='button' class='chipbtn' data-k='sev' data-v='$s'>$s <span>$(@($all | Where-Object { $_.Severity -eq $s }).Count)</span></button>") }
+    $roleCount = @{}
+    foreach ($f in $all) { $rr = (Get-OwnerRoute $f).Role; $roleCount[$rr] = 1 + [int]$roleCount[$rr] }
+    [void]$sb.Append("</div><div><label>Owner</label><button type='button' class='chipbtn on' data-k='owner' data-v='all'>All</button>")
+    foreach ($role in $OwnerRoles) { if ([int]$roleCount[$role] -gt 0) { [void]$sb.Append("<button type='button' class='chipbtn' data-k='owner' data-v='$(Format-Html $role)' title='Who is best placed to fix it'>$(Format-Html $role) <span>$($roleCount[$role])</span></button>") } }
     [void]$sb.Append("</div><div><label for='areaFilter'>Area</label><select id='areaFilter'><option value='all'>All areas</option>")
     $topics = @($all | ForEach-Object { if ($_.Topic -ge 1 -and $_.Topic -le 18) { $_.Topic } else { 0 } } | Sort-Object -Unique)
     foreach ($t in $topics) { $nm = if ($t -eq 0) { 'Other' } else { $TopicNames[$t] }; [void]$sb.Append("<option value='$t'>$t. $(Format-Html $nm)</option>") }
@@ -4716,7 +5089,7 @@ function Get-HtmlAppendix {
         [void]$sb.Append("<h3>Why some data is missing</h3>" + (Format-HtmlTable -Rows $causeRows -Columns @('Host', 'Cause', 'Calls', 'Example call', 'Server message', 'What to do') -Limit 15 -MoreLabel 'causes'))
     }
     $pr = @(@{ N = 'Authentication method'; V = $AuthMethod }, @{ N = 'Look-back (days)'; V = $UsageLookbackDays }, @{ N = 'Stale after (days)'; V = $StaleDays }, @{ N = 'Dataverse environments scanned (max)'; V = $MaxDataverseEnvironments }, @{ N = 'Environment settings calls (max)'; V = $MaxEnvironmentSettingsCalls }, @{ N = 'Flow run sample (max flows)'; V = $FlowRunSampleLimit }, @{ N = 'Agent components per environment (max)'; V = $MaxAgentComponentsPerEnvironment }, @{ N = 'Flow definitions per environment (max)'; V = $MaxFlowDefinitionsPerEnvironment }, @{ N = 'Evidence rows per CSV (max)'; V = $EvidenceRowLimit }, @{ N = 'Checklist source'; V = $script:ChecklistSource }, @{ N = 'Exceptions file'; V = $(if ($ExceptionsPath) { [System.IO.Path]::GetFileName($ExceptionsPath) } else { 'none' }) }, @{ N = 'Developer environment deadline'; V = $DeveloperEnvironmentDeadline.ToString('yyyy-MM-dd') })
-    $skips = @(@('SkipLegacyApis', $SkipLegacyApis), @('SkipEntra', $SkipEntra), @('SkipDataverse', $SkipDataverse), @('SkipDeepScan', $SkipDeepScan), @('SkipUsage', $SkipUsage) | Where-Object { [bool]$_[1] } | ForEach-Object { $_[0] })
+    $skips = @(@('SkipLegacyApis', $SkipLegacyApis), @('SkipEntra', $SkipEntra), @('SkipDataverse', $SkipDataverse), @('SkipDeepScan', $SkipDeepScan), @('SkipUsage', $SkipUsage), @('SkipHandoff', $SkipHandoff) | Where-Object { [bool]$_[1] } | ForEach-Object { $_[0] })
     $pr += @{ N = 'Skipped steps'; V = $(if ($skips.Count -gt 0) { $skips -join ', ' } else { 'none' }) }
     [void]$sb.Append("<h3>Run parameters</h3>" + (Format-HtmlTable -Rows @($pr | ForEach-Object { [pscustomobject]@{ Setting = $_.N; Value = $_.V } }) -Columns @('Setting', 'Value') -Class 'narrow'))
     [void]$sb.Append(@'
@@ -4726,6 +5099,8 @@ function Get-HtmlAppendix {
 <tr><th>findings.csv, findings.json</th><td>Every finding with status, severity, confidence and recommendation. Use findings.json as the baseline for the next run (-BaselinePath).</td></tr>
 <tr><th>findings-register.csv</th><td>Open gaps in the framework findings-register layout, with Owner / date left blank for the remediation backlog.</td></tr>
 <tr><th>agent-risk-register.csv, environment-profile.csv</th><td>Full risk views behind the Agents and Environments sections.</td></tr>
+<tr><th>owner-outreach.csv</th><td>One row per asset owner with the assets that need attention and the recommended action, so an admin can notify makers. Assets with no usable owner are in one No owner row.</td></tr>
+<tr><th>workitems-azure-devops.csv, workitems-jira.csv</th><td>The open Fail and Warning findings as work items for CSV import into Azure DevOps or Jira, with priority, suggested owner and effort. Not written with -SkipHandoff.</td></tr>
 <tr><th>usage-*.csv, evidence\*.csv</th><td>Full lists behind the usage tables and the evidence shown under each finding.</td></tr>
 <tr><th>checklist-coverage.csv</th><td>Every checklist item with its coverage: automated, attempted but unavailable, or manual.</td></tr>
 <tr><th>accepted-risks.csv</th><td>Every row of the exceptions file with its state, the findings it accepted, owner, approver and expiry (only with -ExceptionsPath).</td></tr>
