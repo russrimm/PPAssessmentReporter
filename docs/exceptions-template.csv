@@ -1,0 +1,3 @@
+Id,Title,Reason,Owner,ApprovedBy,Approved,Reviewed,Expires
+9.1,Agents that do not ask users to sign in up front,Example: public FAQ agent that only returns published content,jane.doe@contoso.com,Contoso CISO,2026-11-01,2026-11-01,2027-05-01
+3.1,,Example: the default environment hosts approved legacy apps until the migration ends,pat.lee@contoso.com,Contoso CISO,2026-11-01,,2027-03-31

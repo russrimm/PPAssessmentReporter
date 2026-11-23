@@ -67,6 +67,15 @@
     A previous run folder (or its findings.json). Adds a "Since the last run" section that lists new,
     resolved, improved and regressed findings and the change in the governance KPIs.
 
+.PARAMETER ExceptionsPath
+    A CSV or JSON file of accepted risks (framework item 1.5). Columns: Id (required, the check ID such as 9.1), Title
+    (optional, the finding title; blank matches every finding with that Id, * and ? are wildcards), Reason (required),
+    Owner, ApprovedBy, Approved, Reviewed, Expires (dates as yyyy-MM-dd). A finding that is a Fail or Warning and matches
+    an unexpired row becomes Accepted: it is left out of the score, Fix these first and the roadmap, and stays visible in
+    the Accepted risks section and in accepted-risks.csv. An expired row no longer applies, so its finding is open again.
+    A row with no owner, no expiry date or no review for more than 90 days makes finding 1.5 a Warning. See
+    docs\exceptions-template.csv.
+
 .PARAMETER CustomerName
     Shown on the report cover and written to run-summary.json.
 
@@ -174,7 +183,7 @@
     Output (in -OutputPath, default .\PPCS-Review-<timestamp>):
         report.html, findings.csv, findings.json, findings-register.csv (framework template, owner/date blank),
         agent-risk-register.csv, environment-profile.csv, run-summary.json, checklist-coverage.csv, api-log.csv,
-        usage-*.csv, evidence\*.csv
+        usage-*.csv, evidence\*.csv, accepted-risks.csv (only with -ExceptionsPath)
 
     The output folder contains tenant data (users, environments, agent names). Store and share it accordingly.
     CSV cells that start with = + - @ are prefixed with an apostrophe so a maker-chosen name cannot run as a
@@ -227,6 +236,7 @@ param(
     [int]$EvidenceRowLimit = 500,
     [datetime]$DeveloperEnvironmentDeadline = [datetime]'2026-12-15',
     [string]$BaselinePath,
+    [string]$ExceptionsPath,
     [string]$CustomerName,
     [string]$PreparedBy,
     [switch]$OpenReport
@@ -243,6 +253,8 @@ if (-not $ChecklistPath) { $ChecklistPath = Join-Path $scriptDir 'PPCS-Checklist
 $ApiVersion = '2024-10-01'
 $HtmlEvidenceRows = 50
 $MinScoredChecks = 10
+$ExceptionReviewDays = 90
+$ExceptionExpiringDays = 30
 
 $script:Findings = New-Object System.Collections.ArrayList
 $script:ApiLog = New-Object System.Collections.ArrayList
@@ -260,6 +272,8 @@ $script:AgentAccess = @{}
 $script:OrphanedAssets = @()
 $script:AgentCredits = @{}
 $script:OwnerNames = @{}
+$script:ExceptionRows = @()
+$script:ExceptionsLoaded = $false
 $script:Auth = @{ Method = $AuthMethod; Tenant = $TenantId; Refresh = $null; Tokens = @{}; StaticToken = $AccessToken; TenantGuid = $null; User = $null }
 
 $TopicNames = @{
@@ -649,7 +663,7 @@ function Add-Finding {
         TopicName = $TopicNames[$topic]; Title = $Title; Status = $Status; Severity = $sev
         AlsoCovers = @($AlsoCovers); Value = $Value; Detail = $Detail; Recommendation = $Recommendation; Source = $Source
         EvidenceCount = @($Evidence | Where-Object { $null -ne $_ }).Count; EvidenceFile = ''; Evidence = @($Evidence | Where-Object { $null -ne $_ })
-        Confidence = $conf; RollupKey = $RollupKey
+        Confidence = $conf; RollupKey = $RollupKey; AcceptedFrom = ''; Acceptance = $null
     }
     [void]$script:Findings.Add($f)
 }
@@ -2797,6 +2811,156 @@ function Test-ShadowEnvironments {
 }
 
 # ------------------------------------------------------------------ report
+# ------------------------------------------------------------------ accepted risks (exceptions file)
+# A customer can accept a risk on purpose (framework item 1.5). Each accepted risk needs a reason, and should have an owner and an
+# expiry date. A finding that is a Fail or Warning and matches an unexpired row becomes Accepted: it leaves the score, Fix these first
+# and the roadmap, and stays visible in its own report section. Rows match on Id and Title because the finding Key is not stable between runs.
+function ConvertTo-ExceptionDate {
+    param($Value, [string]$Column, $Problems)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { return $Value.Date }
+    $t = ([string]$Value).Trim()
+    if (-not $t) { return $null }
+    $fmt = $null
+    if ($t -match '^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ].*)?$') { $t = "$($Matches[1])-$($Matches[2])-$($Matches[3])"; $fmt = 'yyyy-M-d' }
+    elseif ($t -match '^\d{1,2}/\d{1,2}/\d{4}$') { $fmt = 'M/d/yyyy' }
+    $d = [datetime]::MinValue
+    if ($fmt -and [datetime]::TryParseExact($t, $fmt, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$d)) { return $d.Date }
+    [void]$Problems.Add("$Column '$t' is not a date; use yyyy-MM-dd")
+    return $null
+}
+
+function Format-ExceptionDate {
+    param($Date)
+    if ($null -eq $Date) { return '' }
+    return $Date.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Test-ExceptionTitle {
+    param([string]$Title, [string]$Pattern)
+    if (-not $Pattern) { return $true }
+    if ($Pattern -match '[*?]') { return ($Title -like $Pattern) }
+    return ($Title -eq $Pattern)
+}
+
+# Reads the exceptions file (CSV, or JSON when the extension is .json) and validates each row. Nothing is applied here.
+function Read-ExceptionFile {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "The exceptions file was not found: $Path" }
+    $raw = New-Object System.Collections.ArrayList
+    try {
+        if ([System.IO.Path]::GetExtension($Path).ToLowerInvariant() -eq '.json') {
+            $parsed = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($x in $parsed) { if ($null -ne $x) { [void]$raw.Add($x) } }
+        }
+        else { foreach ($x in @(Import-Csv -LiteralPath $Path -Encoding UTF8)) { [void]$raw.Add($x) } }
+    }
+    catch { throw "The exceptions file could not be read ($Path): $($_.Exception.Message)" }
+    $rows = New-Object System.Collections.ArrayList
+    $n = 0
+    foreach ($r in $raw) {
+        if (-not (@($r.PSObject.Properties | Where-Object { ([string]$_.Value).Trim() -ne '' }).Count)) { continue }
+        $n++
+        $problems = New-Object System.Collections.ArrayList
+        $id = ([string](Get-Prop $r 'Id' '')).Trim()
+        $reason = ([string](Get-Prop $r 'Reason' '')).Trim()
+        if ($id -notmatch '^\d+\.\d+$') { [void]$problems.Add("Id '$id' is not a check ID such as 9.1") }
+        if (-not $reason) { [void]$problems.Add('Reason is required') }
+        [void]$rows.Add([pscustomobject]@{
+                Row = $n; Id = $id; Title = ([string](Get-Prop $r 'Title' '')).Trim(); Reason = $reason
+                Owner = ([string](Get-Prop $r 'Owner' '')).Trim(); ApprovedBy = ([string](Get-Prop $r 'ApprovedBy' '')).Trim()
+                Approved = (ConvertTo-ExceptionDate (Get-Prop $r 'Approved' $null) 'Approved' $problems)
+                Reviewed = (ConvertTo-ExceptionDate (Get-Prop $r 'Reviewed' $null) 'Reviewed' $problems)
+                Expires = (ConvertTo-ExceptionDate (Get-Prop $r 'Expires' $null) 'Expires' $problems)
+                Problems = @($problems); State = ''; Notes = @(); Applied = 0; ReviewDue = $false; DaysToExpiry = $null
+                Findings = ''; Was = ''; Severity = ''
+            })
+    }
+    return $rows.ToArray()
+}
+
+# Matches each row to this run's findings and marks the open ones (Fail or Warning) as Accepted. Expired and invalid rows are never applied.
+function Resolve-AcceptedRisk {
+    param($Rows)
+    $today = (Get-Date).Date
+    foreach ($ex in @($Rows)) {
+        if (@($ex.Problems).Count -gt 0) { $ex.State = 'Invalid'; $ex.Notes = @($ex.Problems); continue }
+        $notes = New-Object System.Collections.ArrayList
+        $found = @($script:Findings | Where-Object { $_.Id -eq $ex.Id -and (Test-ExceptionTitle $_.Title $ex.Title) })
+        $open = @($found | Where-Object { $_.Status -in @('Fail', 'Warning') })
+        $expired = ($null -ne $ex.Expires -and $ex.Expires -lt $today)
+        if ($null -ne $ex.Expires) { $ex.DaysToExpiry = [int]($ex.Expires - $today).TotalDays }
+        $ref = if ($null -ne $ex.Reviewed) { $ex.Reviewed } else { $ex.Approved }
+        if ($null -eq $ref) { [void]$notes.Add('No approval or review date') }
+        elseif (($today - $ref).TotalDays -gt $ExceptionReviewDays) { $ex.ReviewDue = $true; [void]$notes.Add("Review due: last approved or reviewed on $(Format-ExceptionDate $ref)") }
+        if (-not $ex.Owner) { [void]$notes.Add('No owner') }
+        if ($null -eq $ex.Expires) { [void]$notes.Add('No expiry date (permanent)') }
+        $ex.Findings = (@($found | ForEach-Object { "$($_.Id) $($_.Title)" }) -join ' | ')
+        $ex.Was = (@($open | ForEach-Object { $_.Status } | Select-Object -Unique) -join ', ')
+        $ex.Severity = (@($open | ForEach-Object { $_.Severity } | Select-Object -Unique) -join ', ')
+        if ($expired) {
+            $ex.State = 'Expired'
+            [void]$notes.Insert(0, "Expired on $(Format-ExceptionDate $ex.Expires)" + $(if ($open.Count -gt 0) { '; the finding is open again' } else { '' }))
+        }
+        elseif ($found.Count -eq 0) {
+            $ex.State = 'No match'
+            [void]$notes.Insert(0, 'No finding in this run has this Id and title (fixed, not run or mistyped)')
+        }
+        elseif ($open.Count -eq 0) {
+            $ex.State = 'Nothing to accept'
+            $first = $found | Select-Object -First 1
+            [void]$notes.Insert(0, $(if ($first.Status -eq 'Accepted') { 'Already covered by an earlier row' } else { "The matching finding is $($first.Status), so there is no open gap to accept" }))
+        }
+        else {
+            $ex.State = 'Active'
+            if ($null -ne $ex.DaysToExpiry -and $ex.DaysToExpiry -le $ExceptionExpiringDays) { $ex.State = 'Expiring soon'; [void]$notes.Insert(0, "Expires in $($ex.DaysToExpiry) day(s)") }
+            foreach ($f in $open) {
+                $f.AcceptedFrom = $f.Status
+                $f.Status = 'Accepted'
+                $f.Acceptance = [pscustomobject]@{
+                    Reason = $ex.Reason; Owner = $ex.Owner; ApprovedBy = $ex.ApprovedBy; Approved = (Format-ExceptionDate $ex.Approved)
+                    Reviewed = (Format-ExceptionDate $ex.Reviewed); Expires = (Format-ExceptionDate $ex.Expires); Notes = ($notes -join '; ')
+                }
+                $ex.Applied++
+            }
+        }
+        $ex.Notes = @($notes)
+    }
+}
+
+function Add-ExceptionFinding {
+    param($Rows)
+    $all = @($Rows)
+    $active = @($all | Where-Object { $_.State -in @('Active', 'Expiring soon') })
+    $soon = @($all | Where-Object { $_.State -eq 'Expiring soon' })
+    $expired = @($all | Where-Object { $_.State -eq 'Expired' })
+    $invalid = @($all | Where-Object { $_.State -eq 'Invalid' })
+    $noMatch = @($all | Where-Object { $_.State -in @('No match', 'Nothing to accept') })
+    $noExpiry = @($active | Where-Object { $null -eq $_.Expires })
+    $noOwner = @($active | Where-Object { -not $_.Owner })
+    $due = @($active | Where-Object { $_.ReviewDue })
+    $accepted = 0
+    foreach ($a in $all) { $accepted += [int]$a.Applied }
+    $problems = $expired.Count + $invalid.Count + $noExpiry.Count + $noOwner.Count + $due.Count
+    $st = if ($all.Count -eq 0) { 'Info' } elseif ($problems -gt 0) { 'Warning' } else { 'Pass' }
+    $bits = New-Object System.Collections.ArrayList
+    [void]$bits.Add("$($all.Count) exception row(s): $($active.Count) active, covering $accepted finding(s)")
+    if ($soon.Count -gt 0) { [void]$bits.Add("$($soon.Count) expire within $ExceptionExpiringDays days") }
+    if ($expired.Count -gt 0) { [void]$bits.Add("$($expired.Count) expired") }
+    if ($invalid.Count -gt 0) { [void]$bits.Add("$($invalid.Count) invalid and not applied") }
+    if ($noMatch.Count -gt 0) { [void]$bits.Add("$($noMatch.Count) matched no open finding") }
+    if ($noExpiry.Count -gt 0) { [void]$bits.Add("$($noExpiry.Count) with no expiry date") }
+    if ($noOwner.Count -gt 0) { [void]$bits.Add("$($noOwner.Count) with no owner") }
+    if ($due.Count -gt 0) { [void]$bits.Add("$($due.Count) due for review (over $ExceptionReviewDays days)") }
+    $evidence = @($all | Where-Object { $_.State -ne 'Active' -or @($_.Notes).Count -gt 0 } | ForEach-Object {
+            [pscustomobject]@{ Row = $_.Row; Id = $_.Id; Title = $_.Title; State = $_.State; Owner = $_.Owner; Expires = (Format-ExceptionDate $_.Expires); Notes = (@($_.Notes) -join '; ') }
+        })
+    Add-Finding -Id '1.5' -Title 'Exception register (accepted risks)' -Status $st -Source ('Exceptions file: ' + [System.IO.Path]::GetFileName($ExceptionsPath)) `
+        -Value ($bits -join '; ') -Evidence $evidence `
+        -Detail 'The script reads only this file. It cannot see exceptions granted elsewhere, for example data policy exemptions in the Power Platform admin center, so compare them with the file. Accepted findings are not scored; each one stays listed under Accepted risks until it expires.' `
+        -Recommendation $(if ($st -eq 'Warning') { 'Renew or remove expired exceptions, give every exception an owner and an expiry date, and review each one at least every quarter.' } else { '' })
+}
+
 function Format-Html { param($s) return [System.Net.WebUtility]::HtmlEncode([string]$s) }
 
 function Save-Evidence {
@@ -2823,7 +2987,7 @@ function Save-Evidence {
 # ------------------------------------------------------------------ report model: scoring, priorities, roadmap
 function Get-StatusCounts {
     param($Findings)
-    $c = [ordered]@{ Fail = 0; Warning = 0; Pass = 0; Info = 0; Unavailable = 0 }
+    $c = [ordered]@{ Fail = 0; Warning = 0; Pass = 0; Info = 0; Unavailable = 0; Accepted = 0 }
     foreach ($f in @($Findings)) { $c[[string]$f.Status] = 1 + [int]$c[[string]$f.Status] }
     return $c
 }
@@ -2860,7 +3024,7 @@ function Get-AreaStats {
         $band = Get-MaturityBand $score $crit
         [pscustomobject]@{
             Topic = $t; Name = $TopicNames[$t]; Section = $TopicSection[$t]; Why = $TopicWhy[$t]; Total = $fs.Count
-            Fail = $counts.Fail; Warning = $counts.Warning; Pass = $counts.Pass; Info = $counts.Info; Unavailable = $counts.Unavailable
+            Fail = $counts.Fail; Warning = $counts.Warning; Pass = $counts.Pass; Info = $counts.Info; Unavailable = $counts.Unavailable; Accepted = $counts.Accepted
             Score = $score; Band = $band.Name; BandKey = $band.Key; Capped = $band.Capped; CriticalGaps = $crit
             ChecklistItems = @($script:Checklist.Values | Where-Object { [string]$_.Topic -eq [string]$t }).Count
         }
@@ -2885,6 +3049,9 @@ function Get-OverallStats {
         HighFail = @($all | Where-Object { $_.Status -eq 'Fail' -and $_.Severity -eq 'High' }).Count
         CriticalWarn = @($all | Where-Object { $_.Status -eq 'Warning' -and $_.Severity -eq 'Critical' }).Count
         Unverified = @($all | Where-Object { $_.Status -eq 'Unavailable' -and $_.Severity -in @('Critical', 'High') }).Count
+        Accepted = $counts.Accepted
+        AcceptedCritical = @($all | Where-Object { $_.Status -eq 'Accepted' -and $_.Severity -eq 'Critical' }).Count
+        AcceptedHigh = @($all | Where-Object { $_.Status -eq 'Accepted' -and $_.Severity -eq 'High' }).Count
     }
 }
 
@@ -2938,8 +3105,9 @@ function Get-StartHereRows {
         $nWarn = @($fs | Where-Object Status -eq 'Warning').Count
         $nPass = @($fs | Where-Object Status -eq 'Pass').Count
         $nUnav = @($fs | Where-Object Status -eq 'Unavailable').Count
-        $status = if ($fs.Count -eq 0) { 'Manual' } elseif ($nFail -gt 0) { 'Fail' } elseif ($nWarn -gt 0) { 'Warning' } elseif ($nPass -gt 0) { 'Pass' } elseif ($nUnav -gt 0) { 'Unavailable' } else { 'Info' }
-        $worst = @($fs | Sort-Object @{ Expression = { switch ($_.Status) { 'Fail' { 0 } 'Warning' { 1 } 'Unavailable' { 2 } 'Pass' { 3 } default { 4 } } } }, @{ Expression = { Get-PriorityRank $_ } }, @{ Expression = 'EvidenceCount'; Descending = $true } | Select-Object -First 1)
+        $nAcc = @($fs | Where-Object Status -eq 'Accepted').Count
+        $status = if ($fs.Count -eq 0) { 'Manual' } elseif ($nFail -gt 0) { 'Fail' } elseif ($nWarn -gt 0) { 'Warning' } elseif ($nAcc -gt 0) { 'Accepted' } elseif ($nPass -gt 0) { 'Pass' } elseif ($nUnav -gt 0) { 'Unavailable' } else { 'Info' }
+        $worst = @($fs | Sort-Object @{ Expression = { switch ($_.Status) { 'Fail' { 0 } 'Warning' { 1 } 'Unavailable' { 2 } 'Accepted' { 3 } 'Pass' { 4 } default { 5 } } } }, @{ Expression = { Get-PriorityRank $_ } }, @{ Expression = 'EvidenceCount'; Descending = $true } | Select-Object -First 1)
         [pscustomobject]@{
             N = $s.N; Check = $s.Check; Question = $s.Question; Area = $s.Area; Ids = $ids; Status = $status; Worst = $(if ($worst.Count -gt 0) { $worst[0] } else { $null })
             Linked = $fs.Count; Unverified = $nUnav; ManualIds = $manualIds
@@ -3127,7 +3295,8 @@ function Get-BaselineDiff {
     $file = $Path
     if (Test-Path -LiteralPath $Path -PathType Container) { $file = Join-Path $Path 'findings.json' }
     if (-not (Test-Path -LiteralPath $file)) { Add-Limitation 'Baseline' "Baseline findings.json was not found at $Path, so no comparison is shown."; return $null }
-    try { $base = @(Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json) }
+    # foreach unrolls the array that Windows PowerShell 5.1 returns as a single object; @() alone does not.
+    try { $base = @(); foreach ($x in (Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json)) { $base += $x } }
     catch { Add-Limitation 'Baseline' "Baseline could not be read: $($_.Exception.Message)"; return $null }
     $sumFile = Join-Path (Split-Path -Parent $file) 'run-summary.json'
     $baseSummary = $null
@@ -3137,7 +3306,7 @@ function Get-BaselineDiff {
     $cm = @{}; foreach ($c in $script:Findings) { $cm[(& $keyOf $c)] = $c }
     $value = @{ Pass = 2; Warning = 1; Fail = 0 }
     $new = New-Object System.Collections.ArrayList; $resolved = New-Object System.Collections.ArrayList
-    $improved = New-Object System.Collections.ArrayList; $regressed = New-Object System.Collections.ArrayList; $gone = New-Object System.Collections.ArrayList
+    $improved = New-Object System.Collections.ArrayList; $regressed = New-Object System.Collections.ArrayList; $gone = New-Object System.Collections.ArrayList; $accepted = New-Object System.Collections.ArrayList
     $unchanged = 0
     foreach ($k in $cm.Keys) {
         $c = $cm[$k]
@@ -3145,6 +3314,13 @@ function Get-BaselineDiff {
         $b = $bm[$k]
         if ($b.Status -eq $c.Status) { $unchanged++; continue }
         $row = [pscustomobject]@{ Id = $c.Id; Title = $c.Title; Was = $b.Status; Now = $c.Status; Severity = $c.Severity; Key = $c.Key }
+        # An accepted risk is a decision, not a fix: list it on its own, and treat a lapsed acceptance as a regression.
+        if ($c.Status -eq 'Accepted') { [void]$accepted.Add($row); continue }
+        if ($b.Status -eq 'Accepted') {
+            if ($c.Status -in @('Fail', 'Warning')) { [void]$regressed.Add($row) }
+            elseif ($c.Status -eq 'Pass') { [void]$resolved.Add($row) }
+            continue
+        }
         if ($value.ContainsKey([string]$b.Status) -and $value.ContainsKey([string]$c.Status)) {
             if ($value[[string]$c.Status] -gt $value[[string]$b.Status]) { if ($c.Status -eq 'Pass') { [void]$resolved.Add($row) } else { [void]$improved.Add($row) } }
             else { [void]$regressed.Add($row) }
@@ -3173,7 +3349,7 @@ function Get-BaselineDiff {
     if ($baseSummary -and $baseSummary.Scores -and $null -ne $baseSummary.Scores.Overall) { $beforeScore = [int]$baseSummary.Scores.Overall }
     return [pscustomobject]@{
         Path = $file; When = $when; BeforeScore = $beforeScore; New = $new.ToArray(); Resolved = $resolved.ToArray(); Improved = $improved.ToArray()
-        Regressed = $regressed.ToArray(); Gone = $gone.ToArray(); Unchanged = $unchanged; Kpis = $kpi
+        Regressed = $regressed.ToArray(); Gone = $gone.ToArray(); Accepted = $accepted.ToArray(); Unchanged = $unchanged; Kpis = $kpi
     }
 }
 
@@ -3222,11 +3398,11 @@ function Get-Coverage {
 function Get-ReportCss {
     return @'
 :root{--bg:#f3f6fa;--card:#fff;--ink:#14202e;--muted:#52606f;--line:#dbe3ec;--soft:#eaf1f9;--brand:#0f5fa8;--brand2:#0f6cbd;
---fail:#b42318;--fail-bg:#fde8e6;--warn:#8f4300;--warn-bg:#fdeed3;--pass:#05683f;--pass-bg:#d9f3e4;--info:#0b6a74;--info-bg:#d7f0f2;--na:#475467;--na-bg:#e8ebf0;--man:#6a35a8;--man-bg:#ece3f7;
---c-fail:#d92d20;--c-warn:#f79009;--c-pass:#12b76a;--c-info:#1b9aaa;--c-na:#98a2b3;--high:#8f4300;--med:#44506b;--low:#667085;
+--fail:#b42318;--fail-bg:#fde8e6;--warn:#8f4300;--warn-bg:#fdeed3;--pass:#05683f;--pass-bg:#d9f3e4;--info:#0b6a74;--info-bg:#d7f0f2;--na:#475467;--na-bg:#e8ebf0;--man:#6a35a8;--man-bg:#ece3f7;--acc:#2f3f8f;--acc-bg:#e3e8fa;
+--c-fail:#d92d20;--c-warn:#f79009;--c-pass:#12b76a;--c-info:#1b9aaa;--c-na:#98a2b3;--c-acc:#6b7fd7;--high:#8f4300;--med:#44506b;--low:#667085;
 --shadow:0 1px 2px rgba(20,32,46,.06),0 6px 18px rgba(20,32,46,.05)}
 @media (prefers-color-scheme:dark){:root{--bg:#0b1522;--card:#111f31;--ink:#e6eef8;--muted:#9fb1c5;--line:#25384f;--soft:#182a41;--brand:#6cb6ff;--brand2:#4da3ff;
---fail:#ff9a90;--fail-bg:#3d1714;--warn:#ffbc66;--warn-bg:#3a2a10;--pass:#6fdca0;--pass-bg:#10301f;--info:#5fd3de;--info-bg:#0e3238;--na:#b3bccb;--na-bg:#262b36;--man:#c9aef5;--man-bg:#2a2147;
+--fail:#ff9a90;--fail-bg:#3d1714;--warn:#ffbc66;--warn-bg:#3a2a10;--pass:#6fdca0;--pass-bg:#10301f;--info:#5fd3de;--info-bg:#0e3238;--na:#b3bccb;--na-bg:#262b36;--man:#c9aef5;--man-bg:#2a2147;--acc:#b4c0ff;--acc-bg:#1f2547;
 --high:#ffbc66;--med:#b3bccb;--low:#9aa3b2;--shadow:none}}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth;scroll-padding-top:64px}
@@ -3273,7 +3449,7 @@ h3{margin:22px 0 8px;font-size:15px}
 .donut{width:136px;height:136px;flex:none}.donut-n{font-size:26px;font-weight:700;fill:var(--ink)}.donut-l{font-size:11px;fill:var(--muted)}
 .legend{list-style:none;margin:0;padding:0;font-size:13px}.legend li{display:flex;align-items:center;gap:8px;margin:3px 0}
 .legend i{width:11px;height:11px;border-radius:3px;display:inline-block}.legend b{min-width:28px;display:inline-block;text-align:right}
-.i-fail{background:var(--c-fail)}.i-warn{background:var(--c-warn)}.i-pass{background:var(--c-pass)}.i-info{background:var(--c-info)}.i-na{background:var(--c-na)}
+.i-fail{background:var(--c-fail)}.i-warn{background:var(--c-warn)}.i-pass{background:var(--c-pass)}.i-info{background:var(--c-info)}.i-na{background:var(--c-na)}.i-acc{background:var(--c-acc)}
 table.matrix{border-collapse:collapse;width:100%;font-size:13px}
 table.matrix th{font-weight:600;color:var(--muted);text-align:center;padding:4px 6px;font-size:12px}
 table.matrix td{text-align:center;padding:7px 6px;border-top:1px solid var(--line)}
@@ -3293,7 +3469,7 @@ table.matrix td.h1{background:var(--fail-bg);color:var(--fail);font-weight:700}t
 .why{margin-top:-4px;font-size:12.5px;color:var(--muted)}.why b{color:var(--brand2)}
 .chip{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:650;line-height:1.5;white-space:nowrap}
 .s-Fail{background:var(--fail-bg);color:var(--fail)}.s-Warning{background:var(--warn-bg);color:var(--warn)}.s-Pass{background:var(--pass-bg);color:var(--pass)}
-.s-Info{background:var(--info-bg);color:var(--info)}.s-Unavailable{background:var(--na-bg);color:var(--na)}.s-Manual{background:var(--man-bg);color:var(--man)}
+.s-Info{background:var(--info-bg);color:var(--info)}.s-Unavailable{background:var(--na-bg);color:var(--na)}.s-Manual{background:var(--man-bg);color:var(--man)}.s-Accepted{background:var(--acc-bg);color:var(--acc)}
 .sev-Critical,.r-Critical{background:#b42318;color:#fff}
 .sev-High,.r-High{background:var(--warn-bg);color:var(--high);box-shadow:inset 0 0 0 1px var(--high)}
 .sev-Medium,.r-Medium{background:var(--soft);color:var(--med);box-shadow:inset 0 0 0 1px var(--line)}
@@ -3301,7 +3477,7 @@ table.matrix td.h1{background:var(--fail-bg);color:var(--fail);font-weight:700}t
 .r-None{background:var(--pass-bg);color:var(--pass)}
 .bd{background:var(--bc,var(--c-na));color:#fff}.b-developing .bd{color:#2d1a00}.b-established .bd,.b-leading .bd,.b-none .bd{color:#0b1b33}
 .stack{display:flex;height:9px;border-radius:6px;overflow:hidden;background:var(--line)}
-.stack i{display:block}.stack .fail{background:var(--c-fail)}.stack .warn{background:var(--c-warn)}.stack .pass{background:var(--c-pass)}.stack .info{background:var(--c-info)}.stack .na{background:var(--c-na)}
+.stack i{display:block}.stack .fail{background:var(--c-fail)}.stack .warn{background:var(--c-warn)}.stack .pass{background:var(--c-pass)}.stack .info{background:var(--c-info)}.stack .na{background:var(--c-na)}.stack .acc{background:var(--c-acc)}
 .sechead{display:flex;align-items:baseline;gap:10px;margin:22px 0 10px}.sechead h3{margin:0}.sechead span{color:var(--muted);font-size:12px}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:12px}
 .acard{border:1px solid var(--line);border-top:4px solid var(--bc,var(--c-na));border-radius:10px;padding:12px 14px;background:var(--card);display:flex;flex-direction:column;gap:7px}
@@ -3350,7 +3526,7 @@ details.area>summary:hover,details.marea>summary:hover{background:var(--soft)}
 .why{margin:0 16px 10px;color:var(--muted);font-size:13px;max-width:1000px}
 .areabody{padding:0 16px 14px;display:grid;gap:10px}
 .finding{border:1px solid var(--line);border-left:5px solid var(--c-na);border-radius:10px;padding:11px 14px;background:var(--card)}
-.finding.st-Fail{border-left-color:var(--c-fail)}.finding.st-Warning{border-left-color:var(--c-warn)}.finding.st-Pass{border-left-color:var(--c-pass)}.finding.st-Info{border-left-color:var(--c-info)}
+.finding.st-Fail{border-left-color:var(--c-fail)}.finding.st-Warning{border-left-color:var(--c-warn)}.finding.st-Pass{border-left-color:var(--c-pass)}.finding.st-Info{border-left-color:var(--c-info)}.finding.st-Accepted{border-left-color:var(--c-acc)}
 .finding[hidden]{display:none}.finding.flash{animation:fl 1.6s ease}@keyframes fl{0%{box-shadow:0 0 0 4px var(--c-warn)}100%{box-shadow:none}}
 .f-top{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.f-top .ft{flex:1;min-width:200px;margin:0;font-size:14.5px}
 .fid{font:600 12px/1 ui-monospace,Consolas,monospace;color:var(--muted);background:var(--soft);padding:4px 7px;border-radius:6px}
@@ -3365,6 +3541,7 @@ a.perma{text-decoration:none;color:var(--muted);font-weight:700;padding:0 4px}a.
 .ctl dl{margin:6px 0 0;display:grid;grid-template-columns:150px 1fr;gap:4px 14px;font-size:12.5px}.ctl dt{color:var(--muted);font-weight:600}.ctl dd{margin:0}
 .note{background:var(--warn-bg);border-left:5px solid var(--c-warn);border-radius:8px;padding:10px 14px;margin:0 0 14px;font-size:13px}
 .note.info{background:var(--info-bg);border-left-color:var(--c-info)}
+.accnote{background:var(--acc-bg);border-left:4px solid var(--c-acc);border-radius:8px;padding:8px 12px;margin:8px 0 0;font-size:12.5px}.accnote b{color:var(--acc)}
 .scope ul{margin:0;padding-left:18px;font-size:13px}.scope li{margin:3px 0}
 .meter{display:grid;gap:9px}.meter .row{display:grid;grid-template-columns:170px 1fr 70px;gap:10px;align-items:center;font-size:12.5px}.meter .row b{text-align:right}
 .mbar{height:10px;border-radius:6px;background:var(--line);overflow:hidden}.mbar i{display:block;height:100%;background:var(--brand2)}
@@ -3468,7 +3645,7 @@ function ConvertTo-CellText {
 
 function Format-StatusChip {
     param([string]$Status)
-    $label = switch ($Status) { 'Unavailable' { 'Not verified' } default { $Status } }
+    $label = switch ($Status) { 'Unavailable' { 'Not verified' } 'Accepted' { 'Accepted risk' } default { $Status } }
     return "<span class='chip s-$Status'>$(Format-Html $label)</span>"
 }
 
@@ -3478,18 +3655,18 @@ function Format-SeverityChip {
 }
 
 function Format-StackedBar {
-    param($Fail, $Warning, $Pass, $Info, $Unavailable)
-    $total = [int]$Fail + [int]$Warning + [int]$Pass + [int]$Info + [int]$Unavailable
+    param($Fail, $Warning, $Pass, $Info, $Unavailable, $Accepted = 0)
+    $total = [int]$Fail + [int]$Warning + [int]$Pass + [int]$Info + [int]$Unavailable + [int]$Accepted
     if ($total -eq 0) { return "<div class='stack'></div>" }
     $seg = { param($n, $cls, $label) if ([int]$n -gt 0) { "<i class='$cls' style='flex:$([int]$n)' title='$($label): $([int]$n)'></i>" } else { '' } }
-    return "<div class='stack' role='img' aria-label='Fail $Fail, warning $Warning, pass $Pass, info $Info, not verified $Unavailable'>$(& $seg $Fail 'fail' 'Fail')$(& $seg $Warning 'warn' 'Warning')$(& $seg $Pass 'pass' 'Pass')$(& $seg $Info 'info' 'Info')$(& $seg $Unavailable 'na' 'Not verified')</div>"
+    return "<div class='stack' role='img' aria-label='Fail $Fail, warning $Warning, pass $Pass, info $Info, not verified $Unavailable, accepted $Accepted'>$(& $seg $Fail 'fail' 'Fail')$(& $seg $Warning 'warn' 'Warning')$(& $seg $Pass 'pass' 'Pass')$(& $seg $Info 'info' 'Info')$(& $seg $Unavailable 'na' 'Not verified')$(& $seg $Accepted 'acc' 'Accepted risk')</div>"
 }
 
 function Format-DonutSvg {
     param($Counts, [int]$Total)
     $r = 52
     $circ = 2 * [math]::PI * $r
-    $map = [ordered]@{ Fail = 'var(--c-fail)'; Warning = 'var(--c-warn)'; Pass = 'var(--c-pass)'; Info = 'var(--c-info)'; Unavailable = 'var(--c-na)' }
+    $map = [ordered]@{ Fail = 'var(--c-fail)'; Warning = 'var(--c-warn)'; Pass = 'var(--c-pass)'; Info = 'var(--c-info)'; Unavailable = 'var(--c-na)'; Accepted = 'var(--c-acc)' }
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append("<svg class='donut' viewBox='0 0 140 140' role='img' aria-label='Findings by status'><circle cx='70' cy='70' r='$r' fill='none' stroke='var(--line)' stroke-width='18'/>")
     $offset = 0.0
@@ -3499,7 +3676,7 @@ function Format-DonutSvg {
         $len = [math]::Round($circ * $n / $Total, 2)
         $gap = [math]::Round($circ - $len, 2)
         $off = [math]::Round(-$offset, 2)
-        $label = if ($s -eq 'Unavailable') { 'Not verified' } else { $s }
+        $label = switch ($s) { 'Unavailable' { 'Not verified' } 'Accepted' { 'Accepted risk' } default { $s } }
         [void]$sb.Append("<circle cx='70' cy='70' r='$r' fill='none' stroke='$($map[$s])' stroke-width='18' stroke-dasharray='$len $gap' stroke-dashoffset='$off' transform='rotate(-90 70 70)'><title>$($label): $n</title></circle>")
         $offset += $circ * $n / $Total
     }
@@ -3554,6 +3731,7 @@ function Format-HtmlTable {
 $WhyRules = @(
     @{ Id = '^1\.3$'; Title = 'welcome content'; Why = 'Welcome content tells new makers where to build, what data is allowed and who to ask, before they create anything.' }
     @{ Id = '^1\.3$'; Why = 'Environment group rules apply governance consistently to every environment in the group instead of one at a time.' }
+    @{ Id = '^1\.5$'; Why = 'Time-boxed, owned exceptions keep accepted risk visible and reviewed, so a temporary exemption cannot quietly become a permanent, undocumented one.' }
     @{ Id = '^1\.[67]$'; Why = 'You cannot govern what you cannot see, so a current inventory of apps, flows and agents is the baseline for every other control.' }
     @{ Id = '^2\.1$'; Why = 'Standing admin accounts are the highest-value targets in the tenant, so fewer of them means less damage if one is compromised.' }
     @{ Id = '^2\.2$'; Why = 'Just-in-time activation through PIM limits how long admin rights exist and adds approval, MFA and an audit trail.' }
@@ -3760,6 +3938,7 @@ $Learn = @{
 $LearnRules = @(
     @{ Id = '^1\.3$'; Title = 'welcome content'; Links = 'WelcomeContent', 'ReactiveGov', 'EnvGroupRules' }
     @{ Id = '^1\.3$'; Links = 'EnvGroupRules', 'EnvGroups' }
+    @{ Id = '^1\.5$'; Links = 'GovernScale', 'AdminBP' }
     @{ Id = '^1\.[67]$'; Links = 'Inventory', 'InventoryApi', 'CSGuidance' }
     @{ Id = '^2\.[12]$'; Links = 'AdminRoles', 'PIM', 'EntraRoleBP' }
     @{ Id = '^2\.3$'; Links = 'TenantSettings', 'AdminBP' }
@@ -3874,7 +4053,7 @@ function Get-LearnLinks {
 
 function Format-FindingCard {
     param($F)
-    $actionable = $F.Status -in @('Fail', 'Warning', 'Unavailable')
+    $actionable = $F.Status -in @('Fail', 'Warning', 'Unavailable', 'Accepted')
     $cl = $script:Checklist[$F.Id]
     $confLabel = switch ($F.Confidence) { 'Configuration' { 'Configuration' } 'Sample' { 'Sample' } 'Heuristic' { 'Heuristic' } 'NotVerified' { 'Not verified' } default { [string]$F.Confidence } }
     $confTitle = switch ($F.Confidence) {
@@ -3889,6 +4068,16 @@ function Format-FindingCard {
     [void]$sb.Append((Format-StatusChip $F.Status))
     if ($actionable) { [void]$sb.Append((Format-SeverityChip $F.Severity)) }
     [void]$sb.Append("<span class='fid'>$(Format-Html $F.Id)</span><h3 class='ft'>$(Format-Html $F.Title)</h3><span class='ctag c-$($F.Confidence)' title='$(Format-Html $confTitle)'>$(Format-Html $confLabel)</span><a class='perma' href='#f-$($F.Key)' title='Copy link to this finding' aria-label='Copy link to this finding'>#</a></header>")
+    if ($F.Status -eq 'Accepted' -and $F.Acceptance) {
+        $ac = $F.Acceptance
+        $parts = New-Object System.Collections.ArrayList
+        [void]$parts.Add("<b>Accepted risk</b> (was $(Format-Html $F.AcceptedFrom)). Reason: $(Format-Html $ac.Reason)")
+        if ($ac.Owner) { [void]$parts.Add("Owner: $(Format-Html $ac.Owner)") }
+        if ($ac.ApprovedBy) { [void]$parts.Add("Approved by $(Format-Html $ac.ApprovedBy)$(if ($ac.Approved) { ' on ' + (Format-Html $ac.Approved) })") }
+        if ($ac.Expires) { [void]$parts.Add("Expires $(Format-Html $ac.Expires)") }
+        if ($ac.Notes) { [void]$parts.Add("<i>$(Format-Html $ac.Notes)</i>") }
+        [void]$sb.Append("<div class='accnote'>$($parts -join '. ')</div>")
+    }
     $hasRec = [bool]$F.Recommendation
     $found = ''
     if ($F.Value) { $found += "<p>$(Format-Html $F.Value)</p>" }
@@ -3947,12 +4136,22 @@ function Write-Report {
 
     # ---- machine-readable exports (existing columns first, new columns appended)
     $props = @('Key', 'Id', 'Topic', 'TopicName', 'Title', 'Status', 'Severity', 'Value', 'Detail', 'Recommendation', 'Source', 'EvidenceCount', 'EvidenceFile') +
-    @(@{ Name = 'Confidence'; Expression = { $_.Confidence } }, @{ Name = 'AlsoCovers'; Expression = { @($_.AlsoCovers) -join '; ' } }, @{ Name = 'RollupKey'; Expression = { $_.RollupKey } }, @{ Name = 'LearnLinks'; Expression = { (@(Get-LearnLinks $_) | ForEach-Object { $_.Url }) -join '; ' } }, @{ Name = 'Why'; Expression = { Get-WhyText $_ } })
+    @(@{ Name = 'Confidence'; Expression = { $_.Confidence } }, @{ Name = 'AlsoCovers'; Expression = { @($_.AlsoCovers) -join '; ' } }, @{ Name = 'RollupKey'; Expression = { $_.RollupKey } }, @{ Name = 'LearnLinks'; Expression = { (@(Get-LearnLinks $_) | ForEach-Object { $_.Url }) -join '; ' } }, @{ Name = 'Why'; Expression = { Get-WhyText $_ } }, @{ Name = 'AcceptedFrom'; Expression = { $_.AcceptedFrom } }, @{ Name = 'AcceptedReason'; Expression = { if ($_.Acceptance) { $_.Acceptance.Reason } else { '' } } }, @{ Name = 'AcceptedOwner'; Expression = { if ($_.Acceptance) { $_.Acceptance.Owner } else { '' } } }, @{ Name = 'AcceptedApprovedBy'; Expression = { if ($_.Acceptance) { $_.Acceptance.ApprovedBy } else { '' } } }, @{ Name = 'AcceptedExpires'; Expression = { if ($_.Acceptance) { $_.Acceptance.Expires } else { '' } } })
     $flat = @($script:Findings | Select-Object -Property $props)
     Export-SafeCsv -Rows $flat -Path (Join-Path $Dir 'findings.csv')
     ConvertTo-Json -InputObject $flat -Depth 4 | Out-File -FilePath (Join-Path $Dir 'findings.json') -Encoding UTF8
     Export-SafeCsv -Rows @($script:ApiLog) -Path (Join-Path $Dir 'api-log.csv')
     if ($coverage.Count -gt 0) { Export-SafeCsv -Rows $coverage -Path (Join-Path $Dir 'checklist-coverage.csv') }
+    if ($script:ExceptionsLoaded -and @($script:ExceptionRows).Count -gt 0) {
+        $exRows = @($script:ExceptionRows | ForEach-Object {
+                [pscustomobject][ordered]@{
+                    Row = $_.Row; Id = $_.Id; TitlePattern = $_.Title; State = $_.State; FindingsAccepted = $_.Applied; Findings = $_.Findings; Was = $_.Was; Severity = $_.Severity
+                    Reason = $_.Reason; Owner = $_.Owner; ApprovedBy = $_.ApprovedBy; Approved = (Format-ExceptionDate $_.Approved); Reviewed = (Format-ExceptionDate $_.Reviewed)
+                    Expires = (Format-ExceptionDate $_.Expires); DaysToExpiry = $_.DaysToExpiry; Notes = (@($_.Notes) -join '; ')
+                }
+            })
+        Export-SafeCsv -Rows $exRows -Path (Join-Path $Dir 'accepted-risks.csv')
+    }
     foreach ($u in $script:Usage.Values) {
         if (@($u.Rows).Count -gt 0) { Export-SafeCsv -Rows @($u.Rows) -Path (Join-Path $Dir ('usage-' + $u.Key + '.csv')) }
     }
@@ -3972,6 +4171,16 @@ function Write-Report {
     if ($register.Count -gt 0) { Export-SafeCsv -Rows $register.ToArray() -Path (Join-Path $Dir 'findings-register.csv') }
     if ($agentRisk.Count -gt 0) { Export-SafeCsv -Rows ($agentRisk | Select-Object Agent, Environment, Owner, Authentication, Channels, Published, RiskScore, Rating, Signals, Credits30d, OwnerId, AgentId, EnvironmentId) -Path (Join-Path $Dir 'agent-risk-register.csv') }
     if ($envProfile.Count -gt 0) { Export-SafeCsv -Rows ($envProfile | Select-Object Environment, Type, Managed, Group, SecurityGroup, Geo, Retention, State, Apps, Flows, Agents, Sites, ConversationAudit, DataverseAudit, SystemAdmins, RiskScore, Rating, Flags, EnvironmentId) -Path (Join-Path $Dir 'environment-profile.csv') }
+    $exSummary = $null
+    if ($script:ExceptionsLoaded) {
+        $er = @($script:ExceptionRows)
+        $exSummary = [ordered]@{
+            File = [System.IO.Path]::GetFileName($ExceptionsPath); Rows = $er.Count
+            Active = @($er | Where-Object { $_.State -eq 'Active' }).Count; ExpiringSoon = @($er | Where-Object { $_.State -eq 'Expiring soon' }).Count
+            Expired = @($er | Where-Object { $_.State -eq 'Expired' }).Count; Invalid = @($er | Where-Object { $_.State -eq 'Invalid' }).Count
+            NoOpenFinding = @($er | Where-Object { $_.State -in @('No match', 'Nothing to accept') }).Count; AcceptedFindings = $overall.Accepted
+        }
+    }
     $summaryCounts = [ordered]@{ Total = $overall.Total }
     foreach ($k in $overall.Counts.Keys) { $summaryCounts[$k] = $overall.Counts[$k] }
     $summary = [ordered]@{
@@ -3979,8 +4188,9 @@ function Write-Report {
         PowerShell = $PSVersionTable.PSVersion.ToString()
         Scores = [ordered]@{ Overall = $overall.Score; Band = $overall.Band.Name; Capped = $overall.Band.Capped; Provisional = $overall.Provisional; ScoredChecks = $overall.Scored; CriticalGaps = $overall.CriticalFail }
         Counts = $summaryCounts
-        Areas = @($areas | Select-Object Topic, Name, Section, Score, Band, Fail, Warning, Pass, Info, Unavailable)
+        Areas = @($areas | Select-Object Topic, Name, Section, Score, Band, Fail, Warning,         Pass, Info, Unavailable, Accepted)
         Kpis = $script:Kpi
+                Exceptions = $exSummary
         Limitations = @($script:Limitations)
         Api = [ordered]@{ Total = $health.Total; Ok = $health.Ok; Failed = $health.Failed }
         Parameters = [ordered]@{
@@ -3990,7 +4200,7 @@ function Write-Report {
             MaxAppSharingEnvironments = $MaxAppSharingEnvironments; DefaultEnvironmentAssetWarnThreshold = $DefaultEnvironmentAssetWarnThreshold
             DeveloperEnvironmentDeadline = $DeveloperEnvironmentDeadline.ToString('yyyy-MM-dd'); SkipLegacyApis = [bool]$SkipLegacyApis; SkipEntra = [bool]$SkipEntra
             SkipDataverse = [bool]$SkipDataverse; SkipUsage = [bool]$SkipUsage; SkipDeepScan = [bool]$SkipDeepScan; ChecklistSource = $script:ChecklistSource
-            PowerPlatformApiHost = $PowerPlatformApiHost; BapApiHost = $BapApiHost; GraphHost = $GraphHost
+            PowerPlatformApiHost = $PowerPlatformApiHost; BapApiHost = $BapApiHost; GraphHost = $GraphHost; ExceptionsFile = $(if ($ExceptionsPath) { [System.IO.Path]::GetFileName($ExceptionsPath) } else { '' })
         }
     }
     ConvertTo-Json -InputObject $summary -Depth 6 | Out-File -FilePath (Join-Path $Dir 'run-summary.json') -Encoding UTF8
@@ -4009,6 +4219,7 @@ function Write-Report {
     if ($diff) { [void]$sb.Append((Get-HtmlChanges $m)) }
     [void]$sb.Append((Get-HtmlStartHere $m))
     [void]$sb.Append((Get-HtmlRoadmap $m))
+    if ($script:ExceptionsLoaded) { [void]$sb.Append((Get-HtmlAcceptedRisk)) }
     [void]$sb.Append((Get-HtmlScorecard $m))
     [void]$sb.Append((Get-HtmlUsage))
     [void]$sb.Append((Get-HtmlAgents $m))
@@ -4087,6 +4298,7 @@ function Get-HtmlNav {
     if ($M.Diff) { [void]$items.Add(@('changes', 'Since last run')) }
     [void]$items.Add(@('starthere', 'Start here'))
     [void]$items.Add(@('roadmap', 'Roadmap'))
+    if ($script:ExceptionsLoaded) { [void]$items.Add(@('accepted', 'Accepted risks')) }
     [void]$items.Add(@('scorecard', 'Scorecard'))
     if ($script:Usage.Count -gt 0) { [void]$items.Add(@('usage', 'Usage')) }
     if (@($M.AgentRisk).Count -gt 0) { [void]$items.Add(@('agents', 'Agents')) }
@@ -4114,6 +4326,10 @@ function Get-HtmlSummary {
     else { [void]$parts.Add('No Critical or High gaps were found by the automated checks.') }
     if ($o.CriticalWarn -gt 0) { [void]$parts.Add("$($o.CriticalWarn) Critical control(s) are only partly met.") }
     if ($o.Unverified -gt 0) { [void]$parts.Add("$($o.Unverified) Critical or High check(s) could not be verified.") }
+    if ($o.Accepted -gt 0) {
+        $accSev = if ($o.AcceptedCritical -gt 0 -or $o.AcceptedHigh -gt 0) { " ($($o.AcceptedCritical) Critical, $($o.AcceptedHigh) High)" } else { '' }
+        [void]$parts.Add("$($o.Accepted) accepted risk(s)$accSev are left out of the score; see <a href='#accepted'>Accepted risks</a>.")
+    }
     $headline = $parts -join ' '
 
     $matrix = New-Object System.Text.StringBuilder
@@ -4132,7 +4348,8 @@ function Get-HtmlSummary {
     [void]$matrix.Append('</tbody></table>')
 
     $legend = ''
-    foreach ($p in @(@('Fail', 'i-fail', 'Fail'), @('Warning', 'i-warn', 'Warning'), @('Pass', 'i-pass', 'Pass'), @('Info', 'i-info', 'Info'), @('Unavailable', 'i-na', 'Not verified'))) {
+    foreach ($p in @(@('Fail', 'i-fail', 'Fail'), @('Warning', 'i-warn', 'Warning'), @('Pass', 'i-pass', 'Pass'), @('Info', 'i-info', 'Info'), @('Unavailable', 'i-na', 'Not verified'), @('Accepted', 'i-acc', 'Accepted risk'))) {
+        if ($p[0] -eq 'Accepted' -and [int]$c['Accepted'] -eq 0) { continue }
         $legend += "<li><i class='$($p[1])'></i><b>$($c[$p[0]])</b> $($p[2])</li>"
     }
 
@@ -4216,9 +4433,10 @@ function Get-HtmlChanges {
     foreach ($p in @(@('New', 'New problems', $d.New.Count), @('Regressed', 'Got worse', $d.Regressed.Count), @('Improved', 'Improved', $d.Improved.Count), @('Resolved', 'Resolved', $d.Resolved.Count), @('Unchanged', 'Unchanged', $d.Unchanged))) {
         $cards += "<div class='mini'><b>$($p[2])</b><span>$($p[1])</span></div>"
     }
+    if (@($d.Accepted).Count -gt 0) { $cards += "<div class='mini'><b>$(@($d.Accepted).Count)</b><span>Risks accepted</span></div>" }
     $cards += '</div>'
     $lists = ''
-    foreach ($p in @(@('Regressed', 'Findings that got worse', $d.Regressed), @('New', 'New problems', $d.New), @('Improved', 'Findings that improved', $d.Improved), @('Resolved', 'Findings resolved', $d.Resolved), @('Gone', 'No longer reported (check was not run or no longer applies)', $d.Gone))) {
+    foreach ($p in @(@('Regressed', 'Findings that got worse', $d.Regressed), @('New', 'New problems', $d.New), @('Improved', 'Findings that improved', $d.Improved), @('Resolved', 'Findings resolved', $d.Resolved), @('Accepted', 'Risks accepted since the last run', $d.Accepted), @('Gone', 'No longer reported (check was not run or no longer applies)', $d.Gone))) {
         $rows = @($p[2] | Select-Object Id, Title, Was, Now, Severity)
         if ($rows.Count -gt 0) { $lists += "<details><summary>$($p[1]) ($($rows.Count))</summary>$(Format-HtmlTable -Rows $rows -Columns @('Id', 'Title', 'Was', 'Now', 'Severity') -Limit 15 -MoreLabel 'rows')</details>" }
     }
@@ -4276,6 +4494,41 @@ function Get-HtmlRoadmap {
     return "<section class='panel' id='roadmap'><h2>Suggested 30/60/90-day roadmap</h2><p class='lead'>Open findings placed by severity and status: Critical goes to Contain, High and medium gaps to Standardize, the rest to later windows. Adjust each item for the customer's likelihood and impact.$manualNote</p><div class='road'>$cols</div><p class='small'>Planning agent governance fixes? The independent $(Get-NavigatorLink) can help you pick the Microsoft tools and admin centers for each area.</p></section>"
 }
 
+function Get-HtmlAcceptedRisk {
+    $rows = @($script:ExceptionRows)
+    $acc = @($script:Findings | Where-Object { $_.Status -eq 'Accepted' } | Sort-Object @{ Expression = { $SeverityOrder.IndexOf([string]$_.Severity) } }, @{ Expression = { [version]($_.Id + '.0') } }, Key)
+    $needs = @($rows | Where-Object { $_.State -in @('Invalid', 'No match', 'Nothing to accept') }).Count
+    $tileData = @(
+        , @($acc.Count, 'Findings accepted (not scored)')
+        , @(@($rows | Where-Object { $_.State -eq 'Active' }).Count, 'Active exceptions')
+        , @(@($rows | Where-Object { $_.State -eq 'Expiring soon' }).Count, "Expire within $ExceptionExpiringDays days")
+        , @(@($rows | Where-Object { $_.State -eq 'Expired' }).Count, 'Expired (finding open again)')
+        , @($needs, 'Rows to fix or remove')
+    )
+    $tiles = "<div class='diffgrid'>" + ((@($tileData | ForEach-Object { "<div class='mini'><b>$($_[0])</b><span>$($_[1])</span></div>" })) -join '') + '</div>'
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append("<section class='panel' id='accepted'><h2>Accepted risks</h2><p class='lead'>Gaps the customer has accepted on purpose, read from $(Format-Html ([System.IO.Path]::GetFileName($ExceptionsPath))). They are left out of the score, Fix these first and the roadmap, but stay listed here until they expire. An expired row no longer applies, so its finding is open again. The script sees only this file, not exemptions granted elsewhere.</p>$tiles")
+    if ($acc.Count -gt 0) {
+        [void]$sb.Append("<div class='tablewrap'><table class='data'><thead><tr><th scope='col'>Finding</th><th scope='col'>Severity</th><th scope='col'>Was</th><th scope='col'>Reason</th><th scope='col'>Owner</th><th scope='col'>Expires</th></tr></thead><tbody>")
+        foreach ($f in $acc) {
+            $ac = $f.Acceptance
+            $exp = if ($ac -and $ac.Expires) { Format-Html $ac.Expires } else { 'No expiry' }
+            [void]$sb.Append("<tr><td><a href='#f-$($f.Key)'>$(Format-Html $f.Title)</a> <span class='fid'>$(Format-Html $f.Id)</span></td><td>$(Format-SeverityChip $f.Severity)</td><td>$(Format-Html $f.AcceptedFrom)</td><td class='wide'>$(Format-Html $(if ($ac) { $ac.Reason }))</td><td>$(Format-Html $(if ($ac) { $ac.Owner }))</td><td>$exp</td></tr>")
+        }
+        [void]$sb.Append('</tbody></table></div>')
+    }
+    else { [void]$sb.Append("<p class='small'>No finding is accepted in this run.</p>") }
+    $display = @($rows | ForEach-Object {
+            [pscustomobject]@{
+                Row = $_.Row; Finding = $(if ($_.Findings) { $_.Findings } else { (($_.Id, $_.Title) -join ' ').Trim() }); State = $_.State; Reason = $_.Reason; Owner = $_.Owner
+                'Approved by' = $_.ApprovedBy; Expires = (Format-ExceptionDate $_.Expires); Notes = (@($_.Notes) -join '; ')
+            }
+        })
+    if ($display.Count -gt 0) { [void]$sb.Append("<details style='margin-top:14px'><summary>Exception register: every row in the file ($($display.Count))</summary>$(Format-HtmlTable -Rows $display -Columns @('Row', 'Finding', 'State', 'Reason', 'Owner', 'Approved by', 'Expires', 'Notes') -WideColumns @('Finding', 'Reason', 'Notes') -Limit 15 -MoreLabel 'rows')</details>") }
+    [void]$sb.Append('</section>')
+    return $sb.ToString()
+}
+
 function Get-HtmlScorecard {
     param($M)
     $sb = New-Object System.Text.StringBuilder
@@ -4291,9 +4544,9 @@ function Get-HtmlScorecard {
         [void]$sb.Append("<div class='sechead'><h3>$(Format-Html $sec)</h3><span>$(Format-Html $secTxt)</span></div><div class='cards'>")
         foreach ($a in $as) {
             $chip = if ($null -ne $a.Score) { "<span class='chip bd'>$(Format-Html $a.Band) $($a.Score)%</span>" } else { "<span class='chip s-Manual'>Not scored</span>" }
-            $counts = "$($a.Fail) fail &middot; $($a.Warning) warning &middot; $($a.Pass) pass &middot; $($a.Info) info &middot; $($a.Unavailable) not verified"
+            $counts = "$($a.Fail) fail &middot; $($a.Warning) warning &middot; $($a.Pass) pass &middot; $($a.Info) info &middot; $($a.Unavailable) not verified$(if ([int]$a.Accepted -gt 0) { " &middot; $($a.Accepted) accepted" })"
             $link = if ($a.Total -gt 0) { "<a class='go' href='#area-$($a.Topic)'>View $($a.Total) finding(s)</a>" } else { "<span class='small'>No automated checks. $($a.ChecklistItems) checklist item(s) need a manual review.</span>" }
-            [void]$sb.Append("<div class='acard b-$($a.BandKey)'><div class='h'><b><span class='num'>$($a.Topic)</span>$(Format-Html $a.Name)</b>$chip</div>$(Format-StackedBar $a.Fail $a.Warning $a.Pass $a.Info $a.Unavailable)<div class='counts'>$counts</div><p>$(Format-Html $a.Why)</p>$link</div>")
+            [void]$sb.Append("<div class='acard b-$($a.BandKey)'><div class='h'><b><span class='num'>$($a.Topic)</span>$(Format-Html $a.Name)</b>$chip</div>$(Format-StackedBar $a.Fail $a.Warning $a.Pass $a.Info $a.Unavailable $a.Accepted)<div class='counts'>$counts</div><p>$(Format-Html $a.Why)</p>$link</div>")
         }
         [void]$sb.Append('</div>')
     }
@@ -4376,14 +4629,14 @@ function Get-HtmlFindings {
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append("<section class='panel' id='findings'><h2>All findings</h2><p class='lead'>Every automated result with its evidence, grouped by assessment area and ordered by priority. Select an area to open it, or use Expand all. Filters combine; search also looks inside evidence tables. Select the # next to a title to copy a link to it.</p><div class='filters'>")
     [void]$sb.Append("<div><label>Status</label><button type='button' class='chipbtn on' data-k='status' data-v='all'>All <span>$($all.Count)</span></button>")
-    foreach ($p in @(@('Fail', 'Fail'), @('Warning', 'Warning'), @('Unavailable', 'Not verified'), @('Pass', 'Pass'), @('Info', 'Info'))) { [void]$sb.Append("<button type='button' class='chipbtn' data-k='status' data-v='$($p[0])'>$($p[1]) <span>$($c[$p[0]])</span></button>") }
+    foreach ($p in @(@('Fail', 'Fail'), @('Warning', 'Warning'), @('Unavailable', 'Not verified'), @('Accepted', 'Accepted risk'), @('Pass', 'Pass'), @('Info', 'Info'))) { if ($p[0] -eq 'Accepted' -and [int]$c['Accepted'] -eq 0) { continue }; [void]$sb.Append("<button type='button' class='chipbtn' data-k='status' data-v='$($p[0])'>$($p[1]) <span>$($c[$p[0]])</span></button>") }
     [void]$sb.Append("</div><div><label>Severity</label><button type='button' class='chipbtn on' data-k='sev' data-v='all'>All</button>")
     foreach ($s in $SeverityOrder) { [void]$sb.Append("<button type='button' class='chipbtn' data-k='sev' data-v='$s'>$s <span>$(@($all | Where-Object { $_.Severity -eq $s }).Count)</span></button>") }
     [void]$sb.Append("</div><div><label for='areaFilter'>Area</label><select id='areaFilter'><option value='all'>All areas</option>")
     $topics = @($all | ForEach-Object { if ($_.Topic -ge 1 -and $_.Topic -le 18) { $_.Topic } else { 0 } } | Sort-Object -Unique)
     foreach ($t in $topics) { $nm = if ($t -eq 0) { 'Other' } else { $TopicNames[$t] }; [void]$sb.Append("<option value='$t'>$t. $(Format-Html $nm)</option>") }
     [void]$sb.Append("</select></div><div><input id='q' type='search' placeholder='Search findings and evidence' aria-label='Search findings'></div><div><button type='button' class='tool' id='expandAll'>Expand all</button><button type='button' class='tool' id='collapseAll'>Collapse all</button><button type='button' class='tool' id='resetFilters'>Reset</button></div><span class='small' id='visCount'></span></div>")
-    $statusRank = { param($s) switch ($s) { 'Fail' { 0 } 'Warning' { 1 } 'Unavailable' { 2 } 'Pass' { 3 } default { 4 } } }
+    $statusRank = { param($s) switch ($s) { 'Fail' { 0 } 'Warning' { 1 } 'Unavailable' { 2 } 'Accepted' { 3 } 'Pass' { 4 } default { 5 } } }
     foreach ($t in $topics) {
         $fs = @($all | Where-Object { if ($t -eq 0) { $_.Topic -lt 1 -or $_.Topic -gt 18 } else { $_.Topic -eq $t } })
         if ($fs.Count -eq 0) { continue }
@@ -4396,6 +4649,7 @@ function Get-HtmlFindings {
         if ($cnt.Fail -gt 0) { $chips += "<span class='chip s-Fail'>$($cnt.Fail) fail</span>" }
         if ($cnt.Warning -gt 0) { $chips += "<span class='chip s-Warning'>$($cnt.Warning) warning</span>" }
         if ($cnt.Unavailable -gt 0) { $chips += "<span class='chip s-Unavailable'>$($cnt.Unavailable) not verified</span>" }
+        if ($cnt.Accepted -gt 0) { $chips += "<span class='chip s-Accepted'>$($cnt.Accepted) accepted</span>" }
         if ($cnt.Pass -gt 0) { $chips += "<span class='chip s-Pass'>$($cnt.Pass) pass</span>" }
         if ($cnt.Info -gt 0) { $chips += "<span class='chip s-Info'>$($cnt.Info) info</span>" }
         $bandChip = if ($null -ne $score) { "<span class='b-$($band.Key)'><span class='chip bd'>$(Format-Html $band.Name) $score%</span></span>" } else { '' }
@@ -4444,12 +4698,13 @@ function Get-HtmlAppendix {
 <tr><td><span class="chip s-Pass">Pass</span></td><td>Meets (2)</td><td>The automated test passed. This is not proof that the whole checklist item is satisfied.</td></tr>
 <tr><td><span class="chip s-Info">Info</span></td><td>Not scored</td><td>Context or inventory. It does not change the score.</td></tr>
 <tr><td><span class="chip s-Unavailable">Not verified</span></td><td>Not verified</td><td>The data could not be read (permissions, preview endpoint or the tenant lacks the feature). Treat it as unknown, never as a pass.</td></tr>
+<tr><td><span class="chip s-Accepted">Accepted risk</span></td><td>Not scored</td><td>A Fail or Warning the customer accepted in the exceptions file (-ExceptionsPath). It is left out of the score, Fix these first and the roadmap, and stays listed under Accepted risks until it expires.</td></tr>
 </tbody></table>
 <h3>Severity, confidence and scoring</h3>
 <table class="legendtbl"><tbody>
 <tr><th>Severity</th><td>The checklist's default priority: the severity if the check is a gap. Adjust it with likelihood and impact for the customer (an unauthenticated agent that only reads public content ranks below one that reaches HR data). Severity is shown only on items that need action or verification.</td></tr>
 <tr><th>Confidence</th><td><b>Configuration</b>: read directly from the service. <b>Sample</b>: covers only part of the tenant because of a scan cap or sampling (see Scope and confidence). <b>Heuristic</b>: pattern-based detection such as secret scanning or write-like tool names, so verify before reporting. <b>Not verified</b>: could not be read.</td></tr>
-<tr><th>Score</th><td>Points divided by twice the number of scored checks (Pass 2, Warning 1, Fail 0). Bands: below 40 At risk, 40-69 Developing, 70-89 Established, 90 and above Leading. An area or the overall result is held at Developing while it has a Critical gap.</td></tr>
+<tr><th>Score</th><td>Points divided by twice the number of scored checks (Pass 2, Warning 1, Fail 0). Bands: below 40 At risk, 40-69 Developing, 70-89 Established, 90 and above Leading. An area or the overall result is held at Developing while it has a Critical gap. Accepted risks are not scored and do not count as open gaps.</td></tr>
 <tr><th>Risk ratings</th><td>Agent and environment ratings add points for each signal that is present; the points are listed beside every row so the rating can be challenged.</td></tr>
 </tbody></table>
 '@)
@@ -4460,7 +4715,7 @@ function Get-HtmlAppendix {
         $causeRows = @($h.Causes | Select-Object Host, Cause, Calls, @{ n = 'Example call'; e = { $_.Example } }, @{ n = 'Server message'; e = { Get-ShortText $_.Error 140 } }, @{ n = 'What to do'; e = { $_.WhatToDo } })
         [void]$sb.Append("<h3>Why some data is missing</h3>" + (Format-HtmlTable -Rows $causeRows -Columns @('Host', 'Cause', 'Calls', 'Example call', 'Server message', 'What to do') -Limit 15 -MoreLabel 'causes'))
     }
-    $pr = @(@{ N = 'Authentication method'; V = $AuthMethod }, @{ N = 'Look-back (days)'; V = $UsageLookbackDays }, @{ N = 'Stale after (days)'; V = $StaleDays }, @{ N = 'Dataverse environments scanned (max)'; V = $MaxDataverseEnvironments }, @{ N = 'Environment settings calls (max)'; V = $MaxEnvironmentSettingsCalls }, @{ N = 'Flow run sample (max flows)'; V = $FlowRunSampleLimit }, @{ N = 'Agent components per environment (max)'; V = $MaxAgentComponentsPerEnvironment }, @{ N = 'Flow definitions per environment (max)'; V = $MaxFlowDefinitionsPerEnvironment }, @{ N = 'Evidence rows per CSV (max)'; V = $EvidenceRowLimit }, @{ N = 'Checklist source'; V = $script:ChecklistSource }, @{ N = 'Developer environment deadline'; V = $DeveloperEnvironmentDeadline.ToString('yyyy-MM-dd') })
+    $pr = @(@{ N = 'Authentication method'; V = $AuthMethod }, @{ N = 'Look-back (days)'; V = $UsageLookbackDays }, @{ N = 'Stale after (days)'; V = $StaleDays }, @{ N = 'Dataverse environments scanned (max)'; V = $MaxDataverseEnvironments }, @{ N = 'Environment settings calls (max)'; V = $MaxEnvironmentSettingsCalls }, @{ N = 'Flow run sample (max flows)'; V = $FlowRunSampleLimit }, @{ N = 'Agent components per environment (max)'; V = $MaxAgentComponentsPerEnvironment }, @{ N = 'Flow definitions per environment (max)'; V = $MaxFlowDefinitionsPerEnvironment }, @{ N = 'Evidence rows per CSV (max)'; V = $EvidenceRowLimit }, @{ N = 'Checklist source'; V = $script:ChecklistSource }, @{ N = 'Exceptions file'; V = $(if ($ExceptionsPath) { [System.IO.Path]::GetFileName($ExceptionsPath) } else { 'none' }) }, @{ N = 'Developer environment deadline'; V = $DeveloperEnvironmentDeadline.ToString('yyyy-MM-dd') })
     $skips = @(@('SkipLegacyApis', $SkipLegacyApis), @('SkipEntra', $SkipEntra), @('SkipDataverse', $SkipDataverse), @('SkipDeepScan', $SkipDeepScan), @('SkipUsage', $SkipUsage) | Where-Object { [bool]$_[1] } | ForEach-Object { $_[0] })
     $pr += @{ N = 'Skipped steps'; V = $(if ($skips.Count -gt 0) { $skips -join ', ' } else { 'none' }) }
     [void]$sb.Append("<h3>Run parameters</h3>" + (Format-HtmlTable -Rows @($pr | ForEach-Object { [pscustomobject]@{ Setting = $_.N; Value = $_.V } }) -Columns @('Setting', 'Value') -Class 'narrow'))
@@ -4473,6 +4728,7 @@ function Get-HtmlAppendix {
 <tr><th>agent-risk-register.csv, environment-profile.csv</th><td>Full risk views behind the Agents and Environments sections.</td></tr>
 <tr><th>usage-*.csv, evidence\*.csv</th><td>Full lists behind the usage tables and the evidence shown under each finding.</td></tr>
 <tr><th>checklist-coverage.csv</th><td>Every checklist item with its coverage: automated, attempted but unavailable, or manual.</td></tr>
+<tr><th>accepted-risks.csv</th><td>Every row of the exceptions file with its state, the findings it accepted, owner, approver and expiry (only with -ExceptionsPath).</td></tr>
 <tr><th>run-summary.json, api-log.csv</th><td>Scores, KPIs, limitations and parameters for this run, and the log of every API call.</td></tr>
 </tbody></table>
 '@)
@@ -4742,6 +4998,11 @@ function Get-BuiltInChecklist {
 
 # ------------------------------------------------------------------ main
 function Invoke-Review {
+    if ($ExceptionsPath) {
+        $script:ExceptionRows = @(Read-ExceptionFile -Path $ExceptionsPath)
+        $script:ExceptionsLoaded = $true
+        Write-Information "Loaded $($script:ExceptionRows.Count) exception row(s) from $ExceptionsPath" -InformationAction Continue
+    }
     $started = Get-Date
     New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
     $checklistRows = @()
@@ -4824,6 +5085,14 @@ function Invoke-Review {
         Invoke-Step 'agent access control and sign-in (Dataverse)' '9.1' { Test-AgentAccessControl -EnvMap $envMap -AgentView $agentView }
     }
 
+    if ($script:ExceptionsLoaded) {
+        Invoke-Step 'accepted risks (exceptions file)' '1.5' {
+            Resolve-AcceptedRisk -Rows $script:ExceptionRows
+            $script:Kpi['Accepted risks'] = @($script:Findings | Where-Object { $_.Status -eq 'Accepted' }).Count
+            Add-ExceptionFinding -Rows $script:ExceptionRows
+        }
+    }
+
     if ($script:Kpi.Count -gt 0) {
         $kv = ($script:Kpi.Keys | ForEach-Object { "$_=$($script:Kpi[$_])" }) -join '; '
         Add-Finding -Id '14.8' -Title 'Governance KPIs (this run)' -Status Info -Value $kv -Source 'derived from the checks above' `
@@ -4831,10 +5100,10 @@ function Invoke-Review {
     }
 
     $html = Write-Report -Dir $OutputPath -Started $started
-    $c = @{}; foreach ($s in 'Pass', 'Fail', 'Warning', 'Info', 'Unavailable') { $c[$s] = @($script:Findings | Where-Object Status -eq $s).Count }
+    $c = @{}; foreach ($s in 'Pass', 'Fail', 'Warning', 'Info', 'Unavailable', 'Accepted') { $c[$s] = @($script:Findings | Where-Object Status -eq $s).Count }
     $ov = Get-OverallStats
     Write-Host ''
-    Write-Host "Done. Fail=$($c.Fail) Warning=$($c.Warning) Pass=$($c.Pass) Info=$($c.Info) Unavailable=$($c.Unavailable)" -ForegroundColor Green
+    Write-Host "Done. Fail=$($c.Fail) Warning=$($c.Warning) Pass=$($c.Pass) Info=$($c.Info) Unavailable=$($c.Unavailable)$(if ($script:ExceptionsLoaded) { " Accepted=$($c.Accepted)" })" -ForegroundColor Green
     $matText = if ($ov.Rated) { "$($ov.Band.Name) ($($ov.Score)%)$(if ($ov.Provisional) { ', provisional' })" } else { "not rated (only $($ov.Scored) check(s) returned a result)" }
     Write-Host "Maturity: $matText; Critical gaps: $($ov.CriticalFail); High gaps: $($ov.HighFail)" -ForegroundColor Green
     Write-Host "Report: $html"

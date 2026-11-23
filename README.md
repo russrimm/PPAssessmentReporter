@@ -56,6 +56,7 @@ The screenshots below come from the redacted sample report. [Open the full sampl
 - [Parameters](#parameters)
 - [How a review runs](#how-a-review-runs)
 - [Reading the report](#reading-the-report)
+- [Accepting a risk](#accepting-a-risk)
 - [What it checks](#what-it-checks)
 - [Risk signals behind the agent and environment ratings](#risk-signals-behind-the-agent-and-environment-ratings)
 - [What it does not check](#what-it-does-not-check)
@@ -76,6 +77,7 @@ The screenshots below come from the redacted sample report. [Open the full sampl
 - **Every finding** with status, severity, confidence, an evidence table, the recommended action, why it matters, and two or three Microsoft Learn references.
 - **Manual checks:** framework items that cannot be automated, so nothing is silently skipped.
 - **Since the last run:** new, resolved, improved and regressed findings when you pass a previous run as a baseline.
+- **Accepted risks:** gaps the customer has accepted on purpose, with a reason, owner and expiry date, when you pass an exceptions file. They are left out of the score but stay visible until they expire.
 - **Data collection health:** which API calls failed and why, so a gap in the data is never mistaken for a pass.
 
 The checks map to the numbered items in the assessment framework (`PowerPlatform_CopilotStudio_Security_Review_v2.docx`). About 90 of its 167 items are automated, fully or in part; the rest appear as manual checks.
@@ -176,6 +178,9 @@ Remove-Item Env:\PPCS_ACCESS_TOKEN
 
 # Compare with a previous run (replace this example with your previous output folder)
 .\Invoke-PPCSReview.ps1 -BaselinePath .\PPCS-Review-20261101-090000
+
+# Record accepted risks (see "Accepting a risk"; start from docs\exceptions-template.csv)
+.\Invoke-PPCSReview.ps1 -ExceptionsPath .\exceptions.csv
 ```
 
 Skip switches reduce coverage; they do not grant access. Token mode covers only the Power Platform API and skips Microsoft Graph, BAP and Dataverse checks. Run `Get-Help .\Invoke-PPCSReview.ps1 -Full` for every parameter, or see the [Parameters](#parameters) table below.
@@ -225,6 +230,7 @@ Optional components: `Az.Accounts` for `-AuthMethod Az`, and `Microsoft.PowerApp
 | `-TopN` | `15` | Rows in each top-N list. |
 | `-EvidenceRowLimit` | `500` | Evidence rows written per finding CSV. The report shows the first 50. |
 | `-BaselinePath` | none | A previous run folder or its `findings.json`, for the "Since the last run" section. |
+| `-ExceptionsPath` | none | A CSV or JSON file of accepted risks. Matching Fail and Warning findings become Accepted: left out of the score, Fix these first and the roadmap, and listed under Accepted risks. See [Accepting a risk](#accepting-a-risk). |
 | `-CustomerName`, `-PreparedBy` | none, signed-in user | Shown on the report cover and in `run-summary.json`. |
 | `-OpenReport` | off | Open the report when the run finishes. |
 
@@ -252,6 +258,7 @@ The navigation bar jumps between Summary, Start here, Roadmap, Scorecard, Usage,
 | Pass | Meets (2) | The automated test passed. It is not proof that the whole checklist item is satisfied. |
 | Info | Not scored | Context, inventory, or an optional recommendation. It does not change the score. |
 | Not verified | Not verified | The data could not be read (permissions, a preview endpoint, or the tenant lacks the feature). Treat it as unknown, never as a pass. The CSV and JSON files call this status `Unavailable`. |
+| Accepted risk | Not scored | A Fail or Warning the customer accepted in the exceptions file. Left out of the score, Fix these first and the roadmap. The CSV and JSON files call this status `Accepted` and keep the original result in `AcceptedFrom`. See [Accepting a risk](#accepting-a-risk). |
 | Manual | Not automated | A framework item the script cannot test. Review it by hand. |
 
 ### Severity, confidence and scoring
@@ -262,6 +269,7 @@ The navigation bar jumps between Summary, Start here, Roadmap, Scorecard, Usage,
 - **Critical gaps** are Fail results with Critical severity. An area or the overall result is held at Developing while it has a Critical gap.
 - **Not rated and Provisional.** Fewer than 10 scored checks means no band is shown. If 25% or more of the checks could not be verified, the rating is marked Provisional.
 - **Optional features are never gaps.** Features that each customer decides on (Managed Environments coverage and management of the default environment, environment routing, the admin digest, IP firewall, cookie binding, content security policy, session timeouts, sharing limits and solution checker enforcement) are reported as Pass when adopted or Info with a "Recommended" action when not.
+- **Accepted risks are not scored.** A Fail or Warning the customer has accepted in an exceptions file leaves the score, Fix these first and the roadmap, and stays listed under Accepted risks with its reason, owner and expiry. See [Accepting a risk](#accepting-a-risk).
 
 ### Fix these first, roadmap and Start here
 
@@ -272,6 +280,33 @@ The navigation bar jumps between Summary, Start here, Roadmap, Scorecard, Usage,
 ### Governance KPIs
 
 The summary tiles and finding 14.8 track: environments, managed environments %, environments in a group %, data policies, rule-set types configured, agents, unauthenticated agents, agents shared with the entire tenant, agents using maker credentials, autonomous agents, apps, flows, orphaned assets, highest Dataverse capacity use %, environments drawing on the credit tenant pool, unused apps, sites without traffic, published agents with no credit use, and flows with no runs (sample). Run monthly with `-BaselinePath` to see the trend.
+
+### Accepting a risk
+
+Some gaps are a deliberate decision, for example a public FAQ agent that does not ask users to sign in. Record them in an exceptions file and pass it with `-ExceptionsPath`. It answers checklist item 1.5 (exceptions recorded with an owner, rationale and expiry date). Start from [docs/exceptions-template.csv](docs/exceptions-template.csv) and copy each `Id` and `Title` from `findings.csv`. A file with the extension `.json` is read as a JSON array of objects with the same property names; anything else is read as CSV.
+
+| Column | Required | Meaning |
+|---|---|---|
+| `Id` | Yes | The check ID, for example `9.1`. |
+| `Title` | No | The finding title. Blank covers every finding with that ID. A full title (not case sensitive) covers one finding. `*` and `?` are wildcards. |
+| `Reason` | Yes | Why the risk is accepted. |
+| `Owner` | Recommended | Who is accountable for the accepted risk. |
+| `ApprovedBy` | No | Who approved the exception. |
+| `Approved`, `Reviewed` | No | Dates as `yyyy-MM-dd`: when the exception was approved and last reviewed. |
+| `Expires` | Recommended | The last day the acceptance applies, as `yyyy-MM-dd`. |
+
+How it works:
+
+- **Only Fail and Warning findings can be accepted.** Pass, Info and Not verified findings never change. A result the script could not read is unknown, not accepted.
+- **Accepted findings are not scored.** They leave the score, Fix these first, the roadmap and the open-items matrix, and an accepted Critical gap no longer holds a band at Developing. The summary always says how many risks are accepted and how many are Critical or High, and the Accepted risks section lists every one with its reason, owner and expiry. `accepted-risks.csv` is the register for audits, and `findings.csv` and `findings.json` keep the original result in `AcceptedFrom`.
+- **An exception covers a whole finding**, not single assets in its evidence table. To keep other assets open, fix them or leave the finding unaccepted.
+- **An expired row does not apply.** The finding is open again and the row is flagged. Invalid rows (a missing or malformed `Id`, no `Reason`, a date that is not `yyyy-MM-dd`) are not applied and are listed. A row that matches no open finding is listed too. When several rows match the same finding, the first one applies.
+- **Finding 1.5** is a Warning when an active row has no owner or no expiry date, a row is expired or invalid, or a row was last approved or reviewed more than 90 days ago. Otherwise it is Pass, or Info when the file has no rows. Without `-ExceptionsPath` item 1.5 stays on the manual list.
+- **Matching uses `Id` and `Title`**, not the `F001` key, which changes between runs. If a later version renames a finding, the row shows "No match"; leave `Title` blank or use a wildcard to keep it stable.
+- **With `-BaselinePath`**, a newly accepted gap is listed as "Risks accepted", not as resolved, and an acceptance that lapsed shows as "got worse".
+- The script reads only this file. It cannot see exemptions granted elsewhere, such as data policy exemptions in the Power Platform admin center.
+
+An accepted risk is a decision, not a fix. Review the file at least every quarter and keep it under version control.
 
 ## What it checks
 
@@ -299,6 +334,11 @@ Every automated finding is listed below, grouped like the report: six sections a
   - **Rated:** Pass when at least one environment group rule set of this type exists, otherwise Info.
   - **Do:** No action; informational.
   - **Learn:** [Rules for environment groups](https://learn.microsoft.com/en-us/power-platform/admin/environment-groups-rules); [Environment groups](https://learn.microsoft.com/en-us/power-platform/admin/environment-groups)
+- **1.5** **Exception register (accepted risks)**
+  - **Rated:** Only when you pass `-ExceptionsPath`; otherwise the item stays on the manual list. Pass when every active exception has an owner and an expiry date, none is expired or invalid, and none was last approved or reviewed more than 90 days ago. Warning otherwise. Info when the file has no rows.
+  - **Do:** Renew or remove expired exceptions, give every exception an owner and an expiry date, and review each one at least every quarter.
+  - **Why:** Time-boxed, owned exceptions keep accepted risk visible and reviewed, so a temporary exemption cannot quietly become a permanent, undocumented one.
+  - **Learn:** [Manage Power Platform adoption at scale](https://learn.microsoft.com/en-us/power-platform/guidance/adoption/govern-at-scale); [Power Platform governance overview and strategy](https://learn.microsoft.com/en-us/power-platform/guidance/adoption/admin-best-practices)
 - **1.6** **Asset inventory totals**
   - **Rated:** Informational. Counts of apps, flows, agents and Power Pages sites from the inventory.
   - **Do:** No action; informational.
@@ -1110,7 +1150,7 @@ The risk views add points for each signal that is present and list the signals b
 
 The script is deliberately honest about its limits.
 
-**Framework items that need a person.** Items such as the governance charter and RACI, intake and approval workflow, maker training, exception management, SIEM ingestion and detections, alerting, the incident response runbook, DPIA and sensitive data in agents, and evaluation and testing practice are listed in the report's **Manual checks** section, grouped by area, with what to check, how to verify it and the target state. That list is built from the framework checklist. The script carries a compressed copy of it, and a `PPCS-Checklist.csv` next to the script (or passed with `-ChecklistPath`) is used instead when present. The file has the columns `Id, Topic, Feature, Check, Verify, Target, Priority` (optional extra columns `Why`, `Reference`, `Framework`). The framework document is the source of both copies: run `.\tools\Export-Checklist.ps1` to rebuild the CSV and the built-in copy after the document changes, and `.\tools\Test-Checklist.ps1` to confirm they are present, current and identical. Only if neither copy can be read does the report lose its manual items and coverage and default findings without their own severity to Medium (so the Critical and High counts, the roadmap and Fix these first can differ); the script then warns and records it in the report's limitations.
+**Framework items that need a person.** Items such as the governance charter and RACI, intake and approval workflow, maker training, exception management (until you pass `-ExceptionsPath`), SIEM ingestion and detections, alerting, the incident response runbook, DPIA and sensitive data in agents, and evaluation and testing practice are listed in the report's **Manual checks** section, grouped by area, with what to check, how to verify it and the target state. That list is built from the framework checklist. The script carries a compressed copy of it, and a `PPCS-Checklist.csv` next to the script (or passed with `-ChecklistPath`) is used instead when present. The file has the columns `Id, Topic, Feature, Check, Verify, Target, Priority` (optional extra columns `Why`, `Reference`, `Framework`). The framework document is the source of both copies: run `.\tools\Export-Checklist.ps1` to rebuild the CSV and the built-in copy after the document changes, and `.\tools\Test-Checklist.ps1` to confirm they are present, current and identical. Only if neither copy can be read does the report lose its manual items and coverage and default findings without their own severity to Medium (so the Critical and High counts, the roadmap and Fix these first can differ); the script then warns and records it in the report's limitations.
 
 **Settings the script does not read yet.** The script reads these only where a documented read path exists. The items below are worth reviewing by hand until a check can be added.
 
@@ -1147,6 +1187,7 @@ Each run writes a `PPCS-Review-<timestamp>` folder:
 | `agent-risk-register.csv`, `environment-profile.csv` | The full risk views behind the Agents and Environments sections. |
 | `usage-*.csv`, `evidence\*.csv` | Full lists behind the usage tables and the evidence under each finding. |
 | `checklist-coverage.csv` | Every checklist item with its coverage: automated, attempted but unavailable, or manual. |
+| `accepted-risks.csv` | With `-ExceptionsPath` only: every row of the exceptions file with its state, the findings it accepted, owner, approver and expiry. |
 | `run-summary.json`, `api-log.csv` | Scores, KPIs, limitations and parameters for the run, and the log of every API call (request IDs help when opening a support case). |
 
 ## Data handling and safety
@@ -1190,6 +1231,7 @@ Start with **Appendix > Data collection health** in the report, or `api-log.csv`
 | `tools/Export-Checklist.ps1` | Rebuilds `PPCS-Checklist.csv` and the script's built-in checklist copy from the framework document. |
 | `tools/Test-Checklist.ps1` | Checks that `PPCS-Checklist.csv` is present, matches the framework document, equals the script's built-in copy and covers every check ID the script reports. |
 | `.github/workflows/validate.yml` | Runs the parse, lint, README coverage and checklist checks on every push and pull request. |
+| `docs/exceptions-template.csv` | A starting point for the exceptions file passed with `-ExceptionsPath`. |
 | `.gitignore`, `.gitattributes` | Exclude run folders; keep the script's and the checklist's encoding and line endings intact. |
 
 ## Related tools

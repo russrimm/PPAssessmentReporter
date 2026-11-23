@@ -6,6 +6,9 @@ All notable changes to `Invoke-PPCSReview.ps1`. Dates are release dates.
 
 ### Added
 
+- **Accepted risks (`-ExceptionsPath`).** Pass a CSV or JSON file of exceptions (`Id`, optional `Title`, `Reason`, `Owner`, `ApprovedBy`, `Approved`, `Reviewed`, `Expires`) and a matching Fail or Warning becomes **Accepted**: it leaves the score, Fix these first and the roadmap, and stays listed in a new **Accepted risks** report section, in `accepted-risks.csv`, in `findings.csv` and `findings.json` (`AcceptedFrom`, `AcceptedReason`, `AcceptedOwner`, `AcceptedApprovedBy`, `AcceptedExpires`) and in `run-summary.json`. Expired and invalid rows never apply, and a finding whose acceptance lapses is open again. The summary always states how many accepted risks are Critical or High. `-BaselinePath` lists newly accepted gaps as "Risks accepted" (not as resolved) and shows a lapsed acceptance as "got worse". See "Accepting a risk" in the README and `docs/exceptions-template.csv`.
+- **Finding 1.5, Exception register (accepted risks).** With `-ExceptionsPath`, checklist item 1.5 is no longer manual: it is a Warning when an active exception has no owner or expiry date, is expired or invalid, or was last approved or reviewed more than 90 days ago.
+- A **Accepted risks** governance KPI and an **Accepted risk** status chip, filter, legend entry and scorecard count.
 - **`PPCS-Checklist.csv` is now in the repository, and the script carries its own copy.** The script reads the checklist for its manual-checks list, coverage and default severities, but the file was never committed, so a fresh clone ran without it and silently lost them. It now ships with the script (167 items in the framework's 18 areas), and a compressed copy is built into `Invoke-PPCSReview.ps1` so a script copied on its own still has it. A CSV next to the script (or `-ChecklistPath`) overrides the built-in copy. The appendix and `run-summary.json` record which source was used.
 - `tools/Export-Checklist.ps1` rebuilds the CSV and the built-in copy from the framework document (ASCII and US English, identical output on PowerShell 7 and Windows PowerShell 5.1) and cross-checks item counts against the document's own summary table.
 - `tools/Test-Checklist.ps1` fails when the CSV is missing, differs from the framework document, differs from the built-in copy, or lacks a check ID that the script reports.
@@ -23,6 +26,7 @@ All notable changes to `Invoke-PPCSReview.ps1`. Dates are release dates.
 
 ### Fixed
 
+- `-BaselinePath` comparison now works on Windows PowerShell 5.1. That edition returns a JSON array as one object, so every finding was read as a single row and the "Since the last run" lists were wrong.
 - Findings 4.6 and 4.7 now treat a connector that is not listed in a policy as Blocked when the policy's default group is Blocked, instead of reporting it as not blocked.
 - Finding 4.6 no longer treats custom connector URL patterns as HTTP endpoint filtering. It reads HTTP endpoint filtering rules when the policy data includes them and reports Warning, not Fail, when it cannot see any.
 - Finding 8.2 (HTTP request triggers) now counts flows set to Anyone, flows with no recognized setting, and restricted flows separately, shows whether each flow is On, Off or Suspended, and is Pass when every HTTP-triggered flow is restricted. A missing setting is listed to verify, never assumed safe or open.
