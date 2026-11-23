@@ -73,6 +73,21 @@
 .PARAMETER PreparedBy
     Shown on the report cover. Defaults to the signed-in user.
 
+.PARAMETER Redact
+    Share-safe mode. Replaces names, accounts, GUIDs and URLs from the tenant with consistent pseudonyms (Environment 001,
+    Agent 001, App 001, Flow 001, Site 001, Policy 001, User 001, user001@redacted.example and similar) in every file the run
+    writes: report.html, all CSV, findings.json, run-summary.json, api-log.csv, usage-*.csv and evidence\*.csv. The same real
+    value always gets the same pseudonym, and counts, scores, rankings and charts do not change, because the checks run on the
+    real values and only the output is redacted. After writing, the script scans the output folder for any value it registered
+    and warns (and records a limitation) if one survived. Names that are common words (for example Production or Test) are not
+    replaced. Redaction is best effort: review the files before you share them. Do not use a redacted run as the -BaselinePath
+    for an unredacted run (finding titles are matched by ID and title). A redacted run can use an unredacted baseline.
+
+.PARAMETER RedactionMapPath
+    With -Redact, writes a CSV (Pseudonym, Original, Kind) that maps each pseudonym back to the real value so you can
+    un-redact later. The file contains the real names: keep it private. The script refuses a path inside the output folder,
+    which is meant to be shared. No map is written unless you supply this parameter.
+
 .PARAMETER StaleDays
     Age in days after which an app, flow, published agent or widely shared app counts as dormant when it has
     not been modified. Default 365.
@@ -170,6 +185,9 @@
 .EXAMPLE
     .\Invoke-PPCSReview.ps1 -TenantId contoso.onmicrosoft.com -SkipDataverse -SkipEntra
 
+.EXAMPLE
+    .\Invoke-PPCSReview.ps1 -Redact -RedactionMapPath D:\private\contoso-redaction-map.csv
+
 .NOTES
     Output (in -OutputPath, default .\PPCS-Review-<timestamp>):
         report.html, findings.csv, findings.json, findings-register.csv (framework template, owner/date blank),
@@ -177,6 +195,7 @@
         usage-*.csv, evidence\*.csv
 
     The output folder contains tenant data (users, environments, agent names). Store and share it accordingly.
+    Use -Redact to produce a copy that is safer to share (see -Redact for what is replaced and what is not).
     CSV cells that start with = + - @ are prefixed with an apostrophe so a maker-chosen name cannot run as a
     spreadsheet formula.
 
@@ -229,6 +248,8 @@ param(
     [string]$BaselinePath,
     [string]$CustomerName,
     [string]$PreparedBy,
+    [switch]$Redact,
+    [string]$RedactionMapPath,
     [switch]$OpenReport
 )
 
@@ -260,6 +281,8 @@ $script:AgentAccess = @{}
 $script:OrphanedAssets = @()
 $script:AgentCredits = @{}
 $script:OwnerNames = @{}
+$script:Inventory = $null
+$script:Redaction = @{ Active = [bool]$Redact; MapPath = [string]$RedactionMapPath; Ready = $false }
 $script:Auth = @{ Method = $AuthMethod; Tenant = $TenantId; Refresh = $null; Tokens = @{}; StaticToken = $AccessToken; TenantGuid = $null; User = $null }
 
 $TopicNames = @{
@@ -434,10 +457,16 @@ function ConvertTo-SafeCsvCell {
 }
 
 function Export-SafeCsv {
-    param($Rows, [string]$Path)
+    param($Rows, [string]$Path, [switch]$Raw)
+    # -Raw skips redaction; only the redaction map (which holds the real values on purpose) uses it.
+    $redact = ($script:Redaction.Active -and -not $Raw)
     $safe = foreach ($r in @($Rows)) {
         $o = [ordered]@{}
-        foreach ($p in $r.PSObject.Properties) { $o[$p.Name] = ConvertTo-SafeCsvCell $p.Value }
+        foreach ($p in $r.PSObject.Properties) {
+            $cell = $p.Value
+            if ($redact -and ($cell -is [string] -or $cell -is [guid] -or $cell -is [uri])) { $cell = Protect-Text ([string]$cell) }
+            $o[$p.Name] = ConvertTo-SafeCsvCell $cell
+        }
         [pscustomobject]$o
     }
     $lines = @($safe | ConvertTo-Csv -NoTypeInformation)
@@ -2803,7 +2832,7 @@ function Save-Evidence {
     param([string]$Dir)
     foreach ($f in $script:Findings) {
         if ($f.EvidenceCount -gt 0) {
-            $slug = ($f.Title -replace '[^A-Za-z0-9]+', '-').Trim('-')
+            $slug = ((Protect-Text $f.Title) -replace '[^A-Za-z0-9]+', '-').Trim('-')
             if ($slug.Length -gt 50) { $slug = $slug.Substring(0, 50) }
             $name = "$($f.Key)-$($f.Id)-$slug.csv"
             try {
@@ -3129,6 +3158,10 @@ function Get-BaselineDiff {
     if (-not (Test-Path -LiteralPath $file)) { Add-Limitation 'Baseline' "Baseline findings.json was not found at $Path, so no comparison is shown."; return $null }
     try { $base = @(Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json) }
     catch { Add-Limitation 'Baseline' "Baseline could not be read: $($_.Exception.Message)"; return $null }
+    # A baseline from an unredacted run can name things that no longer exist (for example a deleted data policy), so register those names before the report is redacted.
+    if ($script:Redaction.Active -and $script:Redaction.Ready) {
+        foreach ($b in $base) { if ([string]$b.Id -eq '4.3' -and [string]$b.Title -match '^Default group for new connectors: (.+)$') { [void](Add-RedactionValue $Matches[1] 'Policy') } }
+    }
     $sumFile = Join-Path (Split-Path -Parent $file) 'run-summary.json'
     $baseSummary = $null
     if (Test-Path -LiteralPath $sumFile) { try { $baseSummary = Get-Content -LiteralPath $sumFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { Write-Verbose "Baseline run-summary.json could not be read: $($_.Exception.Message)" } }
@@ -3239,6 +3272,7 @@ a{color:var(--brand2)}
 .hero .meta{display:flex;flex-wrap:wrap;gap:6px 24px;margin-top:12px;font-size:12.5px;color:#e3eefb}
 .hero .meta b{color:#fff;font-weight:600;margin-right:4px}
 .hero .conf{margin-top:12px;display:inline-block;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.28);border-radius:8px;padding:5px 11px;font-size:12px}
+.hero .conf.red{background:#fff3c4;border-color:#f5c542;color:#4a3500}
 nav.top{position:sticky;top:0;z-index:30;background:var(--card);border-bottom:1px solid var(--line);box-shadow:var(--shadow)}
 nav.top .wrap{display:flex;gap:2px;overflow-x:auto;padding-top:7px;padding-bottom:7px;align-items:center}
 nav.top a{white-space:nowrap;text-decoration:none;color:var(--muted);padding:6px 12px;border-radius:18px;font-weight:600;font-size:13px}
@@ -3926,9 +3960,10 @@ function Format-FindingCard {
 }
 
 function Write-Report {
-    param([string]$Dir, $Started)
+    param([string]$Dir, $Started, [switch]$AfterRedactionCheck)
     $evDir = Join-Path $Dir 'evidence'
     New-Item -ItemType Directory -Force -Path $evDir | Out-Null
+    if ($script:Redaction.Active) { Initialize-Redaction }
     Save-Evidence $evDir
 
     # ---- report model (everything is computed before any file is written so limitations from this stage are included)
@@ -3950,7 +3985,9 @@ function Write-Report {
     @(@{ Name = 'Confidence'; Expression = { $_.Confidence } }, @{ Name = 'AlsoCovers'; Expression = { @($_.AlsoCovers) -join '; ' } }, @{ Name = 'RollupKey'; Expression = { $_.RollupKey } }, @{ Name = 'LearnLinks'; Expression = { (@(Get-LearnLinks $_) | ForEach-Object { $_.Url }) -join '; ' } }, @{ Name = 'Why'; Expression = { Get-WhyText $_ } })
     $flat = @($script:Findings | Select-Object -Property $props)
     Export-SafeCsv -Rows $flat -Path (Join-Path $Dir 'findings.csv')
-    ConvertTo-Json -InputObject $flat -Depth 4 | Out-File -FilePath (Join-Path $Dir 'findings.json') -Encoding UTF8
+    $jsonRows = $flat
+    if ($script:Redaction.Active) { $jsonRows = Protect-Object $flat }
+    ConvertTo-Json -InputObject $jsonRows -Depth 4 | Out-File -FilePath (Join-Path $Dir 'findings.json') -Encoding UTF8
     Export-SafeCsv -Rows @($script:ApiLog) -Path (Join-Path $Dir 'api-log.csv')
     if ($coverage.Count -gt 0) { Export-SafeCsv -Rows $coverage -Path (Join-Path $Dir 'checklist-coverage.csv') }
     foreach ($u in $script:Usage.Values) {
@@ -3976,6 +4013,7 @@ function Write-Report {
     foreach ($k in $overall.Counts.Keys) { $summaryCounts[$k] = $overall.Counts[$k] }
     $summary = [ordered]@{
         SchemaVersion = 1; ScriptVersion = $ScriptVersion; GeneratedAt = ($Started.ToUniversalTime().ToString('s') + 'Z'); Customer = $CustomerName; Tenant = $tenantLabel; RunBy = $script:Auth.User
+        Redacted = [bool]$script:Redaction.Active
         PowerShell = $PSVersionTable.PSVersion.ToString()
         Scores = [ordered]@{ Overall = $overall.Score; Band = $overall.Band.Name; Capped = $overall.Band.Capped; Provisional = $overall.Provisional; ScoredChecks = $overall.Scored; CriticalGaps = $overall.CriticalFail }
         Counts = $summaryCounts
@@ -3993,7 +4031,12 @@ function Write-Report {
             PowerPlatformApiHost = $PowerPlatformApiHost; BapApiHost = $BapApiHost; GraphHost = $GraphHost
         }
     }
-    ConvertTo-Json -InputObject $summary -Depth 6 | Out-File -FilePath (Join-Path $Dir 'run-summary.json') -Encoding UTF8
+    $summaryOut = $summary
+    if ($script:Redaction.Active) {
+        $summaryOut = Protect-Object $summary
+        $summaryOut['RedactionNote'] = 'Names, accounts, IDs and URLs from the tenant were replaced with consistent pseudonyms (for example Environment 001 and User 001). Names that are common words, such as Production or Test, are not replaced. Do not use this run as the -BaselinePath for an unredacted run.'
+    }
+    ConvertTo-Json -InputObject $summaryOut -Depth 6 | Out-File -FilePath (Join-Path $Dir 'run-summary.json') -Encoding UTF8
 
     # ---- HTML
     $m = @{
@@ -4016,10 +4059,30 @@ function Write-Report {
     [void]$sb.Append((Get-HtmlFindings $m))
     [void]$sb.Append((Get-HtmlManual $m))
     [void]$sb.Append((Get-HtmlAppendix $m))
-    [void]$sb.Append("</main><footer class='page'><div class='aboutcard'>$(Get-HtmlAbout)</div>Generated by Invoke-PPCSReview v$ScriptVersion. Results are point-in-time and read-only.</footer><script>$(Get-ReportJs)</script></body></html>")
+    [void]$sb.Append("</main><footer class='page'><div class='aboutcard'>$(Get-HtmlAbout)</div>Generated by Invoke-PPCSReview v$ScriptVersion. Results are point-in-time and read-only.$(if ($script:Redaction.Active) { '<!--ppcs-redaction-footer-->' })</footer><script>$(Get-ReportJs)</script></body></html>")
 
     $html = Join-Path $Dir 'report.html'
-    [System.IO.File]::WriteAllText($html, $sb.ToString(), (New-Object System.Text.UTF8Encoding($true)))
+    $htmlText = $sb.ToString()
+    if ($script:Redaction.Active) {
+        # The banners are added after redaction so their wording can never be changed by it.
+        $htmlText = (Protect-Html $htmlText).Replace('<!--ppcs-redaction-banner-->', (Get-RedactionBanner 'Cover')).Replace('<!--ppcs-redaction-footer-->', (Get-RedactionBanner 'Footer'))
+    }
+    [System.IO.File]::WriteAllText($html, $htmlText, (New-Object System.Text.UTF8Encoding($true)))
+
+    if ($script:Redaction.Active) {
+        $check = Test-RedactionOutput -Dir $Dir
+        if ($check.Count -gt 0 -and -not $AfterRedactionCheck) {
+            $where = (@($check.Survivors | ForEach-Object { $_.File }) -join ', ')
+            Add-Limitation 'Redaction' "The post-write redaction check found $($check.Count) value(s) that were not replaced, in: $where. Review those files before you share this folder."
+            Write-Warning "Redaction check FAILED: $($check.Count) registered or unregistered value(s) survived in $where. Writing the files again with this noted as a limitation; review them before you share the folder."
+            return (Write-Report -Dir $Dir -Started $Started -AfterRedactionCheck)
+        }
+        if ($check.Count -gt 0) {
+            foreach ($s in $check.Survivors) { Write-Warning "Redaction check: $($s.Count) value(s) survived in $($s.File) ($($s.Kinds)). Review this file before you share the folder." }
+        }
+        else { Write-Information "Redaction check: passed. Scanned $($check.Files) file(s) for $($script:Redaction.Entries.Count) registered value(s) and the email, GUID and tenant host patterns." -InformationAction Continue }
+        Export-RedactionMap -Dir $Dir
+    }
     return $html
 }
 
@@ -4027,6 +4090,8 @@ function Write-Report {
 function Get-ShortText {
     param([string]$Text, [int]$Max = 170)
     if (-not $Text) { return '' }
+    # In -Redact mode names are replaced before the text is cut, so a cut can never leave half a name behind.
+    if ($script:Redaction.Active) { $Text = Protect-Text $Text }
     if ($Text.Length -le $Max) { return $Text }
     return $Text.Substring(0, $Max - 1).TrimEnd() + [string][char]0x2026
 }
@@ -4034,6 +4099,7 @@ function Get-ShortText {
 function Get-FirstSentence {
     param([string]$Text, [int]$Max = 200)
     if (-not $Text) { return '' }
+    if ($script:Redaction.Active) { $Text = Protect-Text $Text }
     $mt = [regex]::Match($Text, '^.+?[.!?](\s|$)')
     if ($mt.Success -and $mt.Value.Trim().Length -le $Max) { return $mt.Value.Trim() }
     return (Get-ShortText $Text $Max)
@@ -4050,10 +4116,11 @@ function Get-HtmlHero {
     param($M)
     $subtitle = if ($CustomerName) { "$(Format-Html $CustomerName) &middot; Security, best-practice and risk review" } else { 'Security, best-practice and risk review' }
     $by = if ($PreparedBy) { $PreparedBy } else { $script:Auth.User }
+    $conf = if ($script:Redaction.Active) { '<!--ppcs-redaction-banner-->' } else { "<div class='conf'>Confidential: this report names users, environments and agents from the tenant. Share it only with people who need it.</div>" }
     return @"
 <header class='hero'><div class='wrap'><p class='sub'>$subtitle</p><h1>Power Platform and Copilot Studio review</h1>
 <div class='meta'><span><b>Tenant</b>$(Format-Html $M.TenantLabel)</span><span><b>Prepared by</b>$(Format-Html $by)</span><span><b>Run</b>$($M.Started.ToString('yyyy-MM-dd HH:mm'))</span><span><b>Access</b>read-only</span><span><b>Script</b>v$ScriptVersion</span></div>
-<div class='conf'>Confidential: this report names users, environments and agents from the tenant. Share it only with people who need it.</div></div></header>
+$conf</div></header>
 "@
 }
 
@@ -4483,6 +4550,559 @@ function Get-HtmlAppendix {
     return $sb.ToString()
 }
 
+# ---- redaction (-Redact share-safe mode)
+# Names, accounts, GUIDs and URLs from the tenant are replaced with consistent pseudonyms at the OUTPUT boundary only. The checks,
+# scores and rankings run on the real values; every string written to a file then passes through Protect-Text (CSV cells, JSON
+# values, evidence file names) or Protect-Html (report.html). What gets replaced comes from a registry of the sensitive values
+# found in the run (inventory, owners, evidence tables, run parameters) plus catch-all patterns for emails, GUIDs and tenant,
+# Dataverse, SharePoint and Power Pages hosts. Pseudonyms are numbered in registration order (sorted by name within each kind) and
+# are never derived from the real value. Values that are common words (Production, Test, ...) are not replaced: they carry no
+# identity, and replacing them everywhere would corrupt the report text and the Type column.
+
+# Label used in the pseudonym, and the hex digit that starts a pseudonym GUID. Single kinds use the bare label.
+$script:RedactionKinds = @{
+    Environment = @{ Label = 'Environment'; Code = 'e' }
+    Agent = @{ Label = 'Agent'; Code = 'a' }
+    App = @{ Label = 'App'; Code = 'b' }
+    Flow = @{ Label = 'Flow'; Code = 'f' }
+    Site = @{ Label = 'Site'; Code = 'c' }
+    Policy = @{ Label = 'Policy'; Code = 'd' }
+    Group = @{ Label = 'Environment group'; Code = '2' }
+    SecurityGroup = @{ Label = 'Security group'; Code = '3' }
+    User = @{ Label = 'User'; Code = '1' }
+    Component = @{ Label = 'Component'; Code = '6' }
+    Network = @{ Label = 'IP range'; Code = '8' }
+    Path = @{ Label = 'Local path'; Code = '0' }
+    Host = @{ Label = 'Host'; Code = '7' }
+    Item = @{ Label = 'Item'; Code = '5' }
+    Guid = @{ Label = 'Id'; Code = '9' }
+    Tenant = @{ Label = 'Tenant'; Code = '4'; Single = $true }
+    Customer = @{ Label = 'Customer'; Code = '4'; Single = $true }
+}
+
+$script:RedactionGenericWords = @(
+    'production', 'prod', 'sandbox', 'test', 'tests', 'testing', 'dev', 'development', 'developer', 'trial', 'default', 'demo', 'sample', 'training', 'staging'
+    'teams', 'user', 'users', 'admin', 'admins', 'administrator', 'owner', 'system', 'tenant', 'name', 'group', 'groups', 'policy', 'policies', 'agent', 'agents'
+    'app', 'apps', 'flow', 'flows', 'site', 'sites', 'environment', 'environments', 'copilot', 'dataverse', 'microsoft', 'sharepoint', 'power', 'platform'
+    'yes', 'no', 'none', 'n/a', 'unknown', 'other', 'all', 'any', 'general', 'standard', 'personal', 'public', 'private', 'internal', 'external', 'main', 'primary'
+    'global administrator', 'power platform administrator', 'dynamics 365 administrator'
+)
+
+# Evidence, usage and agent columns that hold a name of a given kind (an ordered list, so numbering is the same on every run).
+$script:RedactionColumns = @(
+    @{ Name = 'Environment'; Kind = 'Environment' }
+    @{ Name = 'Agent'; Kind = 'Agent' }
+    @{ Name = 'App'; Kind = 'App' }
+    @{ Name = 'Flow'; Kind = 'Flow' }
+    @{ Name = 'Site'; Kind = 'Site' }
+    @{ Name = 'Policy'; Kind = 'Policy' }
+    @{ Name = 'Group'; Kind = 'Group' }
+    @{ Name = 'SecurityGroup'; Kind = 'SecurityGroup' }
+    @{ Name = 'Security group'; Kind = 'SecurityGroup' }
+    @{ Name = 'Resource'; Kind = 'Item' }
+    @{ Name = 'Components'; Kind = 'Component'; Split = $true }
+    @{ Name = 'AllowedIpRanges'; Kind = 'Network'; Split = $true }
+    @{ Name = 'Url'; Kind = 'Host' }
+    @{ Name = 'SharePointSites'; Kind = 'Host'; Split = $true }
+    @{ Name = 'PublicSites'; Kind = 'Host'; Split = $true }
+    @{ Name = 'HttpHosts'; Kind = 'Host'; Split = $true }
+)
+$script:RedactionUserColumns = @('Owner', 'OwnerUpn', 'Upn', 'User', 'DisplayName', 'Guest', 'ApplicationUser', 'CreatedBy', 'Account')
+
+# Catch-all patterns, tried on every string: SharePoint sites (host and path), Dataverse and Dynamics hosts, tenant domains,
+# Power Pages portals, environment- and tenant-specific Power Platform API hosts, email addresses and GUIDs.
+$script:RedactionPattern = @(
+    '(?<![\p{L}\p{N}@.-])(?:https?://)?[a-z0-9][a-z0-9-]*\.sharepoint\.com(?:/[^\s''"<>,;)\]]*)?'
+    '(?<![\p{L}\p{N}@.-])(?:https?://)?(?:[a-z0-9][a-z0-9-]*\.)+dynamics\.com'
+    '(?<![\p{L}\p{N}@.-])(?:https?://)?[a-z0-9][a-z0-9-]*\.onmicrosoft\.com'
+    '(?<![\p{L}\p{N}@.-])(?:https?://)?[a-z0-9][a-z0-9-]*\.(?:powerappsportals|microsoftcrmportals|powerpagesites)\.(?:com|us|cn)'
+    '(?<![\p{L}\p{N}@.-])(?:https?://)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:environment|tenant)\.api\.powerplatform\.(?:com|us)'
+    '(?<![\p{L}\p{N}._%+''-])[\p{L}\p{N}._%+''-]+@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+'
+    '(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])'
+) -join '|'
+
+function Get-RedactionShape {
+    param([string]$Value)
+    if ($Value -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { return 'guid' }
+    if ($Value -match '^[^@\s]+@[^@\s]+\.[^@\s]+$') { return 'email' }
+    if ($Value -match '^https?://') { return 'url' }
+    return 'text'
+}
+
+function Get-RedactionNumber {
+    param([string]$Counter)
+    $c = $script:Redaction.Counters
+    $c[$Counter] = 1 + [int]$c[$Counter]
+    return [int]$c[$Counter]
+}
+
+# Words that appear in the report's own static text (checklist, why rules, topic names), so a single-word name that is also
+# ordinary report vocabulary is left alone instead of corrupting the prose.
+function Get-RedactionVocabulary {
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($w in $script:RedactionGenericWords) { [void]$set.Add($w) }
+    $texts = New-Object System.Collections.ArrayList
+    foreach ($row in @($script:Checklist.Values)) { foreach ($p in $row.PSObject.Properties) { [void]$texts.Add([string]$p.Value) } }
+    foreach ($t in (@($TopicNames.Values) + @($TopicWhy.Values))) { [void]$texts.Add([string]$t) }
+    foreach ($s in @($StartHere)) { [void]$texts.Add([string]$s.Check); [void]$texts.Add([string]$s.Question) }
+    foreach ($w in @($WhyRules)) { [void]$texts.Add([string]$w.Why); [void]$texts.Add([string]$w.Title) }
+    foreach ($l in @($Learn.Values)) { [void]$texts.Add([string]@($l)[0]) }
+    foreach ($t in $texts) { foreach ($m in [regex]::Matches($t, '[A-Za-z]{3,}')) { [void]$set.Add($m.Value) } }
+    return , $set
+}
+
+function Optimize-RedactionIndex {
+    param([string]$Key)
+    $list = $script:Redaction.First[$Key]
+    if ($list.Count -gt 1) { $list.Sort(); $list.Reverse() }
+}
+
+# Registers one sensitive value and returns its entry (Value, Alias, Kind, Number), or $null when it is too short, generic or kept.
+function Add-RedactionValue {
+    param([string]$Value, [string]$Kind = 'Item', [int]$Number = 0, [switch]$AsHost)
+    $r = $script:Redaction
+    $v = ([string]$Value).Trim()
+    if ($v.Length -lt 3) { return $null }
+    $known = $r.Exact[$v]
+    if ($known) { return $known }
+    if ($r.Keep.Contains($v)) { return $null }
+    if (-not $script:RedactionKinds.ContainsKey($Kind)) { $Kind = 'Item' }
+    $meta = $script:RedactionKinds[$Kind]
+    $shape = if ($AsHost) { 'host' } else { Get-RedactionShape $v }
+    if ($shape -eq 'text' -and $Kind -ne 'Customer' -and $Kind -ne 'Tenant' -and $r.Vocabulary.Contains($v)) { $r.Skipped = 1 + [int]$r.Skipped; return $null }
+    $n = $Number
+    $alias = ''
+    if ($shape -eq 'guid') {
+        $n = Get-RedactionNumber ('G' + $meta.Code)
+        $alias = '{0}0000000-0000-0000-0000-{1:D12}' -f $meta.Code, $n
+    }
+    elseif ($shape -eq 'email') {
+        if ($n -le 0) { $n = Get-RedactionNumber 'User' }
+        $alias = 'user{0:D3}@redacted.example' -f $n
+    }
+    elseif ($shape -eq 'url' -or $shape -eq 'host') {
+        if ($Kind -eq 'Tenant') { $hostAlias = 'tenant.redacted.example' }
+        elseif ($Kind -eq 'Environment' -and $n -gt 0) { $hostAlias = 'org{0:D3}.crm.redacted.example' -f $n }
+        else { $n = Get-RedactionNumber 'Host'; $hostAlias = 'host{0:D3}.redacted.example' -f $n }
+        $alias = if ($shape -eq 'url') { $v.Substring(0, $v.IndexOf('://') + 3) + $hostAlias } else { $hostAlias }
+    }
+    elseif ($meta.ContainsKey('Single')) { $alias = $meta.Label }
+    else {
+        if ($n -le 0) { $n = Get-RedactionNumber $Kind }
+        $alias = '{0} {1:D3}' -f $meta.Label, $n
+    }
+    $entry = [pscustomobject]@{ Value = $v; Alias = $alias; Kind = $Kind; Number = $n; Shape = $shape }
+    $r.Exact[$v] = $entry
+    [void]$r.Entries.Add($entry)
+    [void]$r.AliasSet.Add($alias)
+    if ($shape -eq 'text' -or $shape -eq 'host') {
+        # Free-text matching looks up runs of whole tokens: the first token picks the possible token counts, then the run itself is looked up.
+        $r.Free[$v] = $entry
+        $first = $r.Token.Match($v).Value
+        if (-not $r.First.ContainsKey($first)) { $r.First[$first] = New-Object System.Collections.ArrayList }
+        $count = $r.Token.Matches($v).Count
+        if (-not $r.First[$first].Contains($count)) { [void]$r.First[$first].Add($count); if ($r.Ready) { Optimize-RedactionIndex $first } }
+    }
+    return $entry
+}
+
+# A person: a display name or an email address. Suffixes the owner lookup adds ("(disabled)", "(deleted account 1a2b3c4d)") are handled.
+function Add-RedactionUser {
+    param([string]$Value, [int]$Number = 0)
+    $v = ([string]$Value).Trim()
+    if ($v -match '^\(deleted account ([0-9a-fA-F]{8})\)$') { return (Add-RedactionValue $Matches[1] 'User') }
+    if ($v -eq '(disabled account)') { return $null }
+    $v = $v -replace '\s*\(disabled\)$', ''
+    return (Add-RedactionValue $v 'User' $Number)
+}
+
+# Decides what a catch-all match becomes. In -Scan mode (the post-write check) nothing is allocated and any match that is not a
+# pseudonym or a kept value is reported as a survivor.
+function Resolve-RedactionMatch {
+    param([string]$Value, [switch]$Scan)
+    $r = $script:Redaction
+    if ($r.Keep.Contains($Value)) { return $null }
+    if ($Value -match '[@.]redacted\.example' -or $Value -match '^[0-9a-f]0000000-0000-0000-0000-[0-9]{12}$') { return $null }
+    $shape = Get-RedactionShape $Value
+    if ($shape -ne 'guid' -and $shape -ne 'email') {
+        # Shared Microsoft hosts (for example api.crm.dynamics.com) carry no tenant identity.
+        $hostPart = ($Value -replace '^https?://', '') -replace '[/?#].*$', ''
+        if ($hostPart -match '^(api|admin|login|www|home|make)\.(crm\d*\.)?dynamics\.com$') { return $null }
+    }
+    $known = $r.Exact[$Value]
+    if ($Scan) { return [pscustomobject]@{ Alias = ''; Kind = $(if ($known) { $known.Kind } else { 'Unregistered' }) } }
+    if ($known) { return $known }
+    $kind = switch ($shape) { 'guid' { 'Guid' } 'email' { 'User' } default { 'Host' } }
+    return (Add-RedactionValue -Value $Value -Kind $kind -AsHost:($shape -eq 'text'))
+}
+
+# Registers whatever the catch-all patterns find in a string, so numbering is allocated in a fixed order before any file is written.
+function Register-RedactionPattern {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text) -or $Text.Length -lt 8) { return }
+    foreach ($m in $script:Redaction.CatchAll.Matches($Text)) { [void](Resolve-RedactionMatch -Value $m.Value) }
+}
+
+function Register-RedactionRow {
+    param($Row)
+    if ($null -eq $Row -or $Row -is [string] -or $Row -is [ValueType]) { return }
+    $vals = @{}
+    foreach ($p in $Row.PSObject.Properties) { if ($null -ne $p.Value) { $vals[$p.Name] = $p.Value } }
+    if ($vals.Count -eq 0) { return }
+    foreach ($col in $script:RedactionColumns) {
+        if (-not $vals.ContainsKey($col.Name)) { continue }
+        $raw = $vals[$col.Name]
+        $text = if ($raw -is [System.Collections.IEnumerable] -and $raw -isnot [string]) { (@($raw) -join '; ') } else { [string]$raw }
+        $parts = if ($col.ContainsKey('Split')) { @($text -split '\s*[;,]\s*') } else { @($text) }
+        foreach ($part in $parts) {
+            $s = $part.Trim()
+            if ($s.Length -lt 3 -or ($col.Kind -ne 'Network' -and $s -match '^[\d\s.,:%+-]+$')) { continue }
+            if ($col.Kind -eq 'Host') {
+                $h = ($s -replace '^https?://', '') -replace '[/?#:].*$', ''
+                if ($h -match '(^|\.)(microsoft\.com|microsoftonline\.com|office\.com|office365\.com|azure\.com|github\.com|aka\.ms)$') { continue }
+                [void](Add-RedactionValue $h 'Host' -AsHost)
+                if ($s -match '^https?://') { [void](Add-RedactionValue $s 'Host') }
+            }
+            else { [void](Add-RedactionValue $s $col.Kind) }
+        }
+    }
+    if ($vals.ContainsKey('Name')) {
+        $kind = $null
+        if ($vals.ContainsKey('Kind')) { $kind = switch ([string]$vals['Kind']) { 'App' { 'App' } 'Flow' { 'Flow' } 'Agent' { 'Agent' } 'Site' { 'Site' } default { $null } } }
+        elseif (-not $vals.ContainsKey('Holder') -and -not $vals.ContainsKey('Setting')) { $kind = 'Item' }
+        if ($kind) { [void](Add-RedactionValue ([string]$vals['Name']) $kind) }
+    }
+    # People: a name and an email in the same row share one number.
+    $userCols = @($script:RedactionUserColumns)
+    if ($vals.ContainsKey('Holder')) { $userCols += 'Name' }
+    $email = ''; $name = ''
+    foreach ($c in $userCols) {
+        if (-not $vals.ContainsKey($c)) { continue }
+        $s = ([string]$vals[$c]).Trim()
+        if ($s.Length -lt 3) { continue }
+        $shape = Get-RedactionShape $s
+        if ($shape -eq 'email') { if (-not $email) { $email = $s } }
+        elseif ($shape -eq 'guid') { [void](Add-RedactionValue $s 'User') }
+        elseif (-not $name) { $name = $s }
+    }
+    $ne = $null
+    if ($name) { $ne = Add-RedactionUser $name }
+    if ($email) {
+        $ee = Add-RedactionValue $email 'User' $(if ($ne) { $ne.Number } else { 0 })
+        # The email was registered earlier under another number: give it the name's number (nothing has been written yet).
+        if ($ne -and $ee -and $ne.Shape -eq 'text' -and $ee.Shape -eq 'email' -and $ee.Number -ne $ne.Number -and -not $script:Redaction.Ready) {
+            $ee.Number = $ne.Number
+            $ee.Alias = 'user{0:D3}@redacted.example' -f $ne.Number
+            [void]$script:Redaction.AliasSet.Add($ee.Alias)
+        }
+    }
+}
+
+function Register-RedactionSource {
+    $r = $script:Redaction
+    # ---- the run itself
+    if ($CustomerName) { [void](Add-RedactionValue $CustomerName 'Customer') }
+    $tenantLabels = New-Object System.Collections.ArrayList
+    $upnDomain = ''
+    if (([string]$script:Auth.User) -match '@([^@\s]+)$') { $upnDomain = $Matches[1] }
+    foreach ($t in @($script:Auth.TenantGuid, $TenantId, $upnDomain)) {
+        $tv = ([string]$t).Trim()
+        if (-not $tv -or $tv -eq 'organizations') { continue }
+        if ((Get-RedactionShape $tv) -eq 'guid') { [void](Add-RedactionValue $tv 'Tenant'); continue }
+        [void](Add-RedactionValue $tv 'Tenant' -AsHost)
+        $label = ($tv -split '\.')[0]
+        if ($label.Length -ge 4 -and -not $r.Vocabulary.Contains($label)) { [void]$tenantLabels.Add($label) }
+    }
+    foreach ($u in @($script:Auth.User, $PreparedBy)) { if ($u) { [void](Add-RedactionUser $u) } }
+    # ---- owners found through Microsoft Graph
+    $ownerKeys = @($script:OwnerNames.Keys | Sort-Object -Property @{ Expression = { [string]$script:OwnerNames[$_] } }, @{ Expression = { [string]$_ } })
+    foreach ($k in $ownerKeys) {
+        [void](Add-RedactionUser ([string]$script:OwnerNames[$k]))
+        [void](Add-RedactionValue ([string]$k) 'User')
+    }
+    # ---- environments and their groups
+    $envs = @($script:EnvMap.Values | Sort-Object -Property @{ Expression = { [string]$_.Name } }, @{ Expression = { [string]$_.Id } })
+    foreach ($e in $envs) {
+        $ne = Add-RedactionValue ([string]$e.Name) 'Environment'
+        $n = if ($ne) { [int]$ne.Number } else { 0 }
+        [void](Add-RedactionValue ([string]$e.Id) 'Environment')
+        $url = ([string]$e.Url).Trim().TrimEnd('/')
+        if ($url) {
+            [void](Add-RedactionValue $url 'Environment' $n)
+            $hostName = ''
+            try { $hostName = ([uri]$url).Host } catch { Write-Verbose "Environment URL '$url' is not a valid URI." }
+            if ($hostName) { [void](Add-RedactionValue $hostName 'Environment' $n -AsHost) }
+        }
+        [void](Add-RedactionValue ([string]$e.DataverseId) 'Environment')
+        [void](Add-RedactionValue ([string]$e.SecurityGroupId) 'SecurityGroup')
+        [void](Add-RedactionValue ([string]$e.GroupId) 'Group')
+        [void](Add-RedactionValue ([string]$e.CreatedById) 'User')
+    }
+    foreach ($g in @($envs | ForEach-Object { [string]$_.Group } | Where-Object { $_ } | Sort-Object -Unique)) { [void](Add-RedactionValue $g 'Group') }
+    # ---- inventory: groups, agents, apps, flows and Power Pages sites
+    $inv = $script:Inventory
+    if ($inv) {
+        foreach ($spec in @(@('Groups', 'Group'), @('Agents', 'Agent'), @('Apps', 'App'), @('Flows', 'Flow'), @('Sites', 'Site'))) {
+            $rows = @(Get-OkRows $inv[$spec[0]])
+            $sorted = @($rows | Sort-Object -Property @{ Expression = { [string](Get-Prop $_ 'properties.displayName' '') } }, @{ Expression = { [string]$_.name } })
+            foreach ($row in $sorted) {
+                [void](Add-RedactionValue ([string](Get-Prop $row 'properties.displayName' '')) $spec[1])
+                [void](Add-RedactionValue ([string]$row.name) $spec[1])
+                [void](Add-RedactionValue ([string](Get-Prop $row 'properties.ownerId' '')) 'User')
+                if ($spec[1] -eq 'Site') {
+                    $su = ([string](Get-Prop $row 'properties.siteUrl' '')).Trim()
+                    if ($su) { Register-RedactionRow ([pscustomobject]@{ Url = $su }) }
+                }
+            }
+        }
+    }
+    foreach ($a in @($script:AgentView | Sort-Object -Property @{ Expression = { [string]$_.Agent } }, @{ Expression = { [string]$_.Id } })) {
+        [void](Add-RedactionValue ([string]$a.Agent) 'Agent')
+        [void](Add-RedactionValue ([string]$a.Id) 'Agent')
+        [void](Add-RedactionValue ([string]$a.Owner) 'User')
+    }
+    # ---- evidence, usage and scan rows
+    foreach ($f in @($script:Findings)) { foreach ($row in @($f.Evidence)) { Register-RedactionRow $row } }
+    foreach ($u in @($script:Usage.Values)) { foreach ($row in @($u.Rows)) { Register-RedactionRow $row } }
+    foreach ($row in @($script:DeepAgentRows)) { Register-RedactionRow $row }
+    foreach ($row in @($script:OrphanedAssets)) { Register-RedactionRow $row }
+    # The tenant name (for example the contoso in contoso.onmicrosoft.com) goes last so a more specific kind, such as an environment with that name, wins.
+    foreach ($label in $tenantLabels) { [void](Add-RedactionValue $label 'Tenant') }
+    # ---- local paths that show in limitations and run parameters
+    foreach ($p in @($ChecklistPath, $BaselinePath, $OutputPath, $scriptDir, (Get-Location).Path)) {
+        if (-not $p -or ([string]$p).Length -lt 4) { continue }
+        [void](Add-RedactionValue ([string]$p) 'Path')
+        $full = ''
+        try { $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath([string]$p) } catch { Write-Verbose "Path '$p' could not be resolved." }
+        if ($full -and $full.Length -ge 4) { [void](Add-RedactionValue $full 'Path') }
+    }
+    # ---- catch-all pass over every string that will be written, in a fixed order
+    foreach ($f in @($script:Findings)) {
+        foreach ($s in @($f.Title, $f.Value, $f.Detail, $f.Recommendation, $f.Source)) { Register-RedactionPattern ([string]$s) }
+        foreach ($row in @($f.Evidence)) {
+            if ($null -eq $row -or $row -is [ValueType]) { continue }
+            if ($row -is [string]) { Register-RedactionPattern $row; continue }
+            foreach ($p in $row.PSObject.Properties) { if ($p.Value -is [string]) { Register-RedactionPattern $p.Value } }
+        }
+    }
+    foreach ($l in @($script:Limitations)) { Register-RedactionPattern ([string]$l.Text) }
+    foreach ($a in @($script:ApiLog)) { foreach ($s in @($a.Name, $a.Endpoint, $a.Error)) { Register-RedactionPattern ([string]$s) } }
+    foreach ($u in @($script:Usage.Values)) { foreach ($row in @($u.Rows)) { foreach ($p in $row.PSObject.Properties) { if ($p.Value -is [string]) { Register-RedactionPattern $p.Value } } } }
+}
+
+function Complete-Redaction {
+    $r = $script:Redaction
+    foreach ($k in @($r.First.Keys)) { Optimize-RedactionIndex $k }
+    $r.Ready = $true
+}
+
+# Builds the registry from everything the run collected. Call it once the findings are final and before any file is written.
+function Initialize-Redaction {
+    $r = $script:Redaction
+    $r.Ready = $false
+    $r.Exact = @{}
+    $r.Free = @{}
+    $r.First = @{}
+    $r.Entries = New-Object System.Collections.ArrayList
+    $r.Counters = @{}
+    $r.Skipped = 0
+    $r.AliasSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $r.Keep = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    # The author's contact details are in the report's About card, and the Microsoft and sign-in client IDs are not tenant data.
+    foreach ($k in @('russ.rimmerman@microsoft.com', 'Russ Rimmerman', '00000000-0000-0000-0000-000000000000', '00000007-0000-0000-c000-000000000000', '11648597-926c-4cf3-9c36-bcebb0ba8dcc', '1950a258-227b-4e31-a9cf-717495945fc2', '44367163-eba1-44c3-98af-f5787879f96a', '475226c6-020e-4fb2-8a90-7a972cbfc1d4', '62e90394-69f5-4237-9190-012177145e10', '7df0a125-d3be-4c96-aa54-591f83ff541c')) { [void]$r.Keep.Add($k) }
+    $r.Vocabulary = Get-RedactionVocabulary
+    $opts = [System.Text.RegularExpressions.RegexOptions]'IgnoreCase, CultureInvariant, Compiled'
+    $r.CatchAll = New-Object System.Text.RegularExpressions.Regex($script:RedactionPattern, $opts)
+    $r.Token = New-Object System.Text.RegularExpressions.Regex('[\p{L}\p{N}]+|[^\p{L}\p{N}\s]', $opts)
+    Register-RedactionSource
+    Complete-Redaction
+}
+
+# Finds what must be replaced in a string: catch-all matches plus registered values (whole tokens, case-insensitive, longest first).
+# Each span is an array: Index, Length, Alias, Kind (arrays are much cheaper than objects when this runs on every string).
+function Get-RedactionSpan {
+    param([string]$Text, [switch]$Scan)
+    $r = $script:Redaction
+    $spans = New-Object System.Collections.ArrayList
+    foreach ($m in $r.CatchAll.Matches($Text)) {
+        $hit = Resolve-RedactionMatch -Value $m.Value -Scan:$Scan
+        if ($hit) { [void]$spans.Add(@($m.Index, $m.Length, $hit.Alias, $hit.Kind)) }
+    }
+    $tokens = $r.Token.Matches($Text)
+    $n = $tokens.Count
+    for ($i = 0; $i -lt $n; $i++) {
+        $t = $tokens[$i]
+        $counts = $r.First[$t.Value]
+        if ($null -eq $counts) { continue }
+        foreach ($k in $counts) {
+            $j = $i + $k - 1
+            if ($j -ge $n) { continue }
+            $last = $tokens[$j]
+            $len = $last.Index + $last.Length - $t.Index
+            $hit = $r.Free[$Text.Substring($t.Index, $len)]
+            if ($null -eq $hit) { continue }
+            if ($Scan -and $r.AliasSet.Contains($hit.Value)) { break }
+            [void]$spans.Add(@($t.Index, $len, $hit.Alias, $hit.Kind))
+            break
+        }
+    }
+    return , $spans
+}
+
+function Protect-Text {
+    param([string]$Text)
+    $r = $script:Redaction
+    if (-not $r.Active -or [string]::IsNullOrEmpty($Text) -or $Text.Length -lt 3) { return $Text }
+    if (-not $r.Ready) { Initialize-Redaction }
+    $whole = $r.Exact[$Text.Trim()]
+    if ($whole) { return $Text.Replace($Text.Trim(), $whole.Alias) }
+    $spans = Get-RedactionSpan -Text $Text
+    if ($spans.Count -eq 0) { return $Text }
+    $ordered = $spans
+    if ($spans.Count -gt 1) { $ordered = @($spans | Sort-Object -Property @{ Expression = { $_[0] } }, @{ Expression = { $_[1] }; Descending = $true }) }
+    $sb = New-Object System.Text.StringBuilder
+    $pos = 0
+    foreach ($s in $ordered) {
+        $end = $s[0] + $s[1]
+        if ($end -le $pos) { continue }
+        if ($s[0] -gt $pos) { [void]$sb.Append($Text, $pos, $s[0] - $pos) }
+        [void]$sb.Append($s[2])
+        $pos = $end
+    }
+    if ($pos -lt $Text.Length) { [void]$sb.Append($Text, $pos, $Text.Length - $pos) }
+    return $sb.ToString()
+}
+
+# Walks an object and returns a copy whose string values are redacted (used for the JSON files). Arrays come back as arrays.
+function Protect-Object {
+    param($Obj)
+    if ($null -eq $Obj) { return $null }
+    if ($Obj -is [string]) { return (Protect-Text $Obj) }
+    if ($Obj -is [guid] -or $Obj -is [uri]) { return (Protect-Text ([string]$Obj)) }
+    if ($Obj -is [System.Collections.IDictionary]) {
+        $o = [ordered]@{}
+        foreach ($k in $Obj.Keys) { $o[$k] = Protect-Object $Obj[$k] }
+        return $o
+    }
+    if ($Obj -is [System.Collections.IEnumerable]) {
+        $list = New-Object System.Collections.ArrayList
+        foreach ($i in $Obj) { [void]$list.Add((Protect-Object $i)) }
+        return , $list.ToArray()
+    }
+    if ($Obj -is [ValueType]) { return $Obj }
+    if ($Obj.PSObject -and $Obj.PSObject.Properties.Count -gt 0) {
+        $o = [ordered]@{}
+        foreach ($p in $Obj.PSObject.Properties) { $o[$p.Name] = Protect-Object $p.Value }
+        return [pscustomobject]$o
+    }
+    return $Obj
+}
+
+# Redacts the human-visible parts of the report (text nodes and title, alt, href, value attributes) and leaves tags, class names,
+# styles and scripts alone. With -Scan it returns the decoded visible text instead, for the post-write check.
+function Convert-HtmlText {
+    param([string]$Html, [switch]$Scan)
+    $attr = New-Object System.Text.RegularExpressions.Regex('(\s(?:title|aria-label|alt|placeholder|href|value|content)\s*=\s*)(?:''([^'']*)''|"([^"]*)")', 'IgnoreCase')
+    $evaluator = [System.Text.RegularExpressions.MatchEvaluator] {
+        param($m)
+        $quote = if ($m.Groups[2].Success) { "'" } else { '"' }
+        $val = if ($m.Groups[2].Success) { $m.Groups[2].Value } else { $m.Groups[3].Value }
+        $dec = [System.Net.WebUtility]::HtmlDecode($val)
+        $red = Protect-Text $dec
+        if ([string]::Equals($red, $dec, [System.StringComparison]::Ordinal)) { return $m.Value }
+        return $m.Groups[1].Value + $quote + [System.Net.WebUtility]::HtmlEncode($red) + $quote
+    }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($p in [regex]::Split($Html, '(?is)(<script\b.*?</script>|<style\b.*?</style>|<!--.*?-->|<[^>]*>)')) {
+        if ($p.Length -eq 0) { continue }
+        if ($p[0] -eq '<') {
+            $skip = ($p -match '^<(script|style|!--)')
+            if ($Scan) {
+                if (-not $skip -and $p.IndexOf('=') -ge 0) {
+                    foreach ($am in $attr.Matches($p)) {
+                        $val = if ($am.Groups[2].Success) { $am.Groups[2].Value } else { $am.Groups[3].Value }
+                        [void]$sb.Append([System.Net.WebUtility]::HtmlDecode($val)).Append("`n")
+                    }
+                }
+            }
+            elseif (-not $skip -and $p.IndexOf('=') -ge 0) { [void]$sb.Append($attr.Replace($p, $evaluator)) }
+            else { [void]$sb.Append($p) }
+            continue
+        }
+        $dec = if ($p.IndexOf('&') -ge 0) { [System.Net.WebUtility]::HtmlDecode($p) } else { $p }
+        if ($Scan) { [void]$sb.Append($dec).Append("`n"); continue }
+        $red = if ($p.Trim().Length -eq 0) { $dec } else { Protect-Text $dec }
+        if ([string]::Equals($red, $dec, [System.StringComparison]::Ordinal)) { [void]$sb.Append($p) } else { [void]$sb.Append([System.Net.WebUtility]::HtmlEncode($red)) }
+    }
+    return $sb.ToString()
+}
+
+function Protect-Html {
+    param([string]$Html)
+    if (-not $script:Redaction.Active) { return $Html }
+    if (-not $script:Redaction.Ready) { Initialize-Redaction }
+    return (Convert-HtmlText -Html $Html)
+}
+
+# Post-write check: scans every text file in the output folder for a registered original or an unregistered email, GUID or tenant
+# host. It reports counts and kinds only, never the values, because the report it feeds is the file that is being shared.
+function Test-RedactionOutput {
+    param([string]$Dir)
+    $root = (Resolve-Path -LiteralPath $Dir).Path
+    $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.html', '.htm', '.csv', '.json', '.txt', '.md', '.xml', '.tsv', '.yml', '.yaml', '.log') })
+    $found = New-Object System.Collections.ArrayList
+    foreach ($f in $files) {
+        $text = [System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
+        $ext = $f.Extension.ToLowerInvariant()
+        if ($ext -eq '.html' -or $ext -eq '.htm') { $text = Convert-HtmlText -Html $text -Scan }
+        elseif ($ext -eq '.json') { try { $text = [regex]::Unescape($text) } catch { Write-Verbose "Could not unescape $($f.Name): $($_.Exception.Message)" } }
+        elseif ($ext -eq '.csv' -or $ext -eq '.tsv') { $text = $text.Replace('""', '"') }
+        $hits = Get-RedactionSpan -Text $text -Scan
+        if ($hits.Count -gt 0) {
+            $kinds = (@($hits | ForEach-Object { $_[3] } | Sort-Object -Unique)) -join ', '
+            [void]$found.Add([pscustomobject]@{ File = $f.FullName.Substring($root.Length).TrimStart('\', '/'); Count = $hits.Count; Kinds = $kinds })
+        }
+    }
+    return [pscustomobject]@{ Files = $files.Count; Survivors = $found.ToArray(); Count = [int](($found | Measure-Object -Property Count -Sum).Sum) }
+}
+
+# The map holds the real values, so it must never be written into the folder that gets shared.
+function Test-RedactionSetting {
+    param([string]$OutputDir)
+    $mapPath = $script:Redaction.MapPath
+    if ($mapPath -and -not $script:Redaction.Active) { throw '-RedactionMapPath needs -Redact. Run again with -Redact, or leave -RedactionMapPath out.' }
+    if (-not $mapPath) { return }
+    if (-not $OutputDir) { $OutputDir = $OutputPath }
+    $sess = $ExecutionContext.SessionState.Path
+    $map = $sess.GetUnresolvedProviderPathFromPSPath($mapPath).TrimEnd('\', '/')
+    $out = $sess.GetUnresolvedProviderPathFromPSPath($OutputDir).TrimEnd('\', '/')
+    if ($map -ieq $out -or $map.StartsWith($out + '\', [System.StringComparison]::OrdinalIgnoreCase) -or $map.StartsWith($out + '/', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "-RedactionMapPath ($mapPath) is inside the output folder ($OutputDir), which is meant to be shared. The map holds the real names, so choose a path outside the output folder."
+    }
+    if (Test-Path -LiteralPath $map -PathType Container) { throw "-RedactionMapPath ($mapPath) is a folder. Give a file name, for example redaction-map.csv." }
+}
+
+function Export-RedactionMap {
+    param([string]$Dir)
+    $r = $script:Redaction
+    if (-not $r.Active -or -not $r.MapPath) { return }
+    Test-RedactionSetting -OutputDir $Dir
+    $map = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($r.MapPath)
+    $parent = Split-Path -Parent $map
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+    $rows = @($r.Entries | Sort-Object -Property Kind, Alias | ForEach-Object { [pscustomobject]@{ Pseudonym = $_.Alias; Original = $_.Value; Kind = $_.Kind } })
+    Export-SafeCsv -Rows $rows -Path $map -Raw
+    Write-Warning "Redaction map written to $map. It contains the REAL names and IDs behind every pseudonym, so keep it private and never share it with the report."
+}
+
+function Get-RedactionBanner {
+    param([ValidateSet('Cover', 'Footer')][string]$Place)
+    if ($Place -eq 'Cover') {
+        return "<div class='conf red'><b>Redacted for sharing.</b> Names, accounts, IDs and URLs from the tenant were replaced with consistent pseudonyms (for example Environment 001 and User 001). Counts, ratings and scores are unchanged. Redaction is best effort, so review the files before you share them.</div>"
+    }
+    return "<p class='small'><b>Redacted output.</b> Tenant names, accounts, IDs and URLs were replaced with pseudonyms. Do not use a redacted run as the baseline (-BaselinePath) for an unredacted run.</p>"
+}
+
 # ------------------------------------------------------------------ built-in checklist
 # A compressed copy of PPCS-Checklist.csv so the script still has the framework checklist when it is copied on its own.
 # A PPCS-Checklist.csv next to the script (or passed with -ChecklistPath) is used instead when present.
@@ -4743,6 +5363,8 @@ function Get-BuiltInChecklist {
 # ------------------------------------------------------------------ main
 function Invoke-Review {
     $started = Get-Date
+    Test-RedactionSetting -OutputDir $OutputPath
+    if ($script:Redaction.Active) { Write-Information 'Redact mode: names, accounts, IDs and URLs will be replaced with pseudonyms in every file this run writes.' -InformationAction Continue }
     New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
     $checklistRows = @()
     if (Test-Path -LiteralPath $ChecklistPath) {
@@ -4769,6 +5391,7 @@ function Invoke-Review {
 
     Write-Host 'Loading Power Platform inventory and environments...' -ForegroundColor Cyan
     $inv = Get-Inventory
+    $script:Inventory = $inv
     $envMap = Merge-Environments $inv
     $script:EnvMap = $envMap
     $catalog = @{}

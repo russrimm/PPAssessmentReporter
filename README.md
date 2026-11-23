@@ -77,6 +77,7 @@ The screenshots below come from the redacted sample report. [Open the full sampl
 - **Manual checks:** framework items that cannot be automated, so nothing is silently skipped.
 - **Since the last run:** new, resolved, improved and regressed findings when you pass a previous run as a baseline.
 - **Data collection health:** which API calls failed and why, so a gap in the data is never mistaken for a pass.
+- **Share-safe mode (`-Redact`):** the same report and exports with names, accounts, IDs and URLs replaced by consistent pseudonyms, so you can share them without exposing the tenant. See [Sharing a report safely](#sharing-a-report-safely).
 
 The checks map to the numbered items in the assessment framework (`PowerPlatform_CopilotStudio_Security_Review_v2.docx`). About 90 of its 167 items are automated, fully or in part; the rest appear as manual checks.
 
@@ -176,6 +177,9 @@ Remove-Item Env:\PPCS_ACCESS_TOKEN
 
 # Compare with a previous run (replace this example with your previous output folder)
 .\Invoke-PPCSReview.ps1 -BaselinePath .\PPCS-Review-20261101-090000
+
+# Produce a copy that is safer to share, and keep a private map of the pseudonyms outside the output folder
+.\Invoke-PPCSReview.ps1 -Redact -RedactionMapPath D:\private\contoso-redaction-map.csv
 ```
 
 Skip switches reduce coverage; they do not grant access. Token mode covers only the Power Platform API and skips Microsoft Graph, BAP and Dataverse checks. Run `Get-Help .\Invoke-PPCSReview.ps1 -Full` for every parameter, or see the [Parameters](#parameters) table below.
@@ -226,6 +230,8 @@ Optional components: `Az.Accounts` for `-AuthMethod Az`, and `Microsoft.PowerApp
 | `-EvidenceRowLimit` | `500` | Evidence rows written per finding CSV. The report shows the first 50. |
 | `-BaselinePath` | none | A previous run folder or its `findings.json`, for the "Since the last run" section. |
 | `-CustomerName`, `-PreparedBy` | none, signed-in user | Shown on the report cover and in `run-summary.json`. |
+| `-Redact` | off | Share-safe mode. Replaces names, accounts, IDs and URLs from the tenant with consistent pseudonyms in every file the run writes, then scans the output folder for anything that survived. Scores, counts and rankings do not change. See [Sharing a report safely](#sharing-a-report-safely). |
+| `-RedactionMapPath` | none | With `-Redact`, writes a CSV that maps each pseudonym back to the real value so you can un-redact later. The file holds the real names, so the script refuses a path inside the output folder. No map is written unless you supply this. |
 | `-OpenReport` | off | Open the report when the run finishes. |
 
 ## How a review runs
@@ -1147,16 +1153,31 @@ Each run writes a `PPCS-Review-<timestamp>` folder:
 | `agent-risk-register.csv`, `environment-profile.csv` | The full risk views behind the Agents and Environments sections. |
 | `usage-*.csv`, `evidence\*.csv` | Full lists behind the usage tables and the evidence under each finding. |
 | `checklist-coverage.csv` | Every checklist item with its coverage: automated, attempted but unavailable, or manual. |
-| `run-summary.json`, `api-log.csv` | Scores, KPIs, limitations and parameters for the run, and the log of every API call (request IDs help when opening a support case). |
+| `run-summary.json`, `api-log.csv` | Scores, KPIs, limitations and parameters for the run (with `"Redacted": true` when `-Redact` was used), and the log of every API call (request IDs help when opening a support case; a redacted run replaces them, so keep the map if you need them). |
 
 ## Data handling and safety
 
 - **Read-only.** The script never creates, changes or deletes anything in the tenant.
 - **Tokens stay in memory.** The script never writes them to disk (the optional Az.Accounts and Power Apps admin modules keep their own sign-in caches). Prefer `PPCS_ACCESS_TOKEN` to `-AccessToken` so a token stays out of shell history.
 - **Secrets are not recorded.** The secret scans in flows and agent topics report that a key, token or password-like value exists, never the value.
-- **The output folder contains tenant data** such as user names, environment names and agent names. Store and share it accordingly. `.gitignore` excludes `PPCS-Review-*/` so a run is not committed by accident.
+- **The output folder contains tenant data** such as user names, environment names and agent names. Store and share it accordingly, or run with `-Redact` for a copy that is safer to share (see [Sharing a report safely](#sharing-a-report-safely)). `.gitignore` excludes `PPCS-Review-*/` so a run is not committed by accident.
 - **Spreadsheet safety.** CSV cells that start with `=`, `+`, `-` or `@` are prefixed with an apostrophe so a maker-chosen name cannot run as a formula, and the HTML report encodes all names.
 - **Network.** The script contacts only Microsoft endpoints: `login.microsoftonline.com`, the Power Platform and BAP APIs, Microsoft Graph, and your Dataverse environment URLs.
+
+### Sharing a report safely
+
+By default the output folder names real users, environments, agents and URLs, so treat all of it as confidential. To share a copy with a vendor, in a support case or in a blog post, run with `-Redact` (and, if you want to un-redact later, `-RedactionMapPath` with a file **outside** the output folder):
+
+```powershell
+.\Invoke-PPCSReview.ps1 -Redact -RedactionMapPath D:\private\redaction-map.csv
+```
+
+- **What is replaced.** Every value gets the same pseudonym in every file (`report.html`, all CSV files, `findings.json`, `run-summary.json`, `api-log.csv`, `usage-*.csv` and `evidence\*.csv`): environments become `Environment 001`, agents `Agent 001`, apps `App 001`, flows `Flow 001`, Power Pages sites `Site 001`, data policies `Policy 001`, environment groups `Environment group 001`, and people `User 001` (or `user001@redacted.example` for an account). The customer name, tenant ID and domain, the run-by user, Dataverse organization URLs, SharePoint and Power Pages URLs, IP ranges and every GUID (including request IDs) are replaced too. Microsoft Learn links and the report's product text stay as they are.
+- **How it works.** The checks, scores, counts, rankings and charts run on the real values and only the output is redacted, so a redacted report reads exactly like the original. The script collects the names it saw (inventory, owner lookup, evidence tables) and replaces them as whole words, longest first and ignoring case, together with patterns for email addresses, GUIDs and tenant, Dataverse, SharePoint and Power Pages hosts. Pseudonyms are numbered in sorted order within each kind and are not derived from the real value, so they cannot be reversed without the map.
+- **What it leaves alone.** A name that is an ordinary word, such as an environment named `Production` or an agent named `Test` (or a word the report's own text uses), is not replaced, because replacing it everywhere would garble the report and it identifies no one. Names shorter than three characters are not replaced either. Redaction is best effort: text that names something the script did not collect (for example the name of an agent topic inside an error message) can survive, so review the files before you share them.
+- **Check after writing.** The script scans every text file in the output folder for a registered value or for any email address, GUID or tenant host that is left. It prints `Redaction check: passed`, or warns, lists the files (never the values) and records a limitation in the report and `run-summary.json`. The report cover and footer say the output is redacted, and `run-summary.json` has `"Redacted": true`.
+- **The map.** `-RedactionMapPath` writes a CSV (`Pseudonym`, `Original`, `Kind`) so you can look up the real value behind a pseudonym, for example a request ID for a support case. It holds the real names: keep it private. The script refuses a path inside the output folder and warns each time it writes the file. No map is written unless you supply the parameter.
+- **Baselines.** Findings are matched on check ID and title, and some titles contain names, so do not use a redacted run as `-BaselinePath` for a later unredacted run: its pseudonyms will not match and the comparison will list those findings as new and no longer reported. A redacted run can use an unredacted baseline; the comparison is built on the real names and the section is redacted like the rest.
 
 ## Troubleshooting
 
@@ -1175,6 +1196,8 @@ Start with **Appendix > Data collection health** in the report, or `api-log.csv`
 | "Not rated" or "Provisional" | Fewer than 10 scored checks, or 25% or more not verified | Fix the access problems listed in the appendix and run again. |
 | Device code sign-in times out | The code was not entered in time | Re-run and complete sign-in sooner. |
 | Large responses fail on Windows PowerShell 5.1 | Known limitation of 5.1 | Use PowerShell 7 or later. |
+| `Redaction check` warns that values survived | The script found a registered name, or an email, GUID or tenant host, that was not replaced (for example text split by markup, or a name the script did not collect) | Open the files the warning lists, edit them by hand and scan again before you share the folder. The report and `run-summary.json` list the files in a limitation. |
+| `-RedactionMapPath` is refused | The path is inside the output folder, is a folder, or `-Redact` is missing | Give a file path outside the output folder (the map holds the real names) and add `-Redact`. |
 
 ## Repository contents
 
