@@ -73,7 +73,8 @@ The screenshots below come from the redacted sample report. [Open the full sampl
 - **Start here:** the framework's 16 highest-value checks, each rolled up from the findings behind it.
 - **30/60/90-day roadmap:** open items grouped into Contain, Standardize, Automate and measure, and Optimize.
 - **Scorecard** for 18 governance areas, a **usage lens** (highest-used and not-used apps, flows, agents and Power Pages sites), an **agent risk register** and an **environment profile**, each with the signals listed beside the score.
-- **Every finding** with status, severity, confidence, an evidence table, the recommended action, why it matters, and two or three Microsoft Learn references.
+- **Every finding** with status, severity, confidence, an evidence table, the recommended action, why it matters, a suggested owner role and effort level, and two or three Microsoft Learn references.
+- **Hand-off files:** `owner-outreach.csv` (who to notify, with their at-risk assets and the recommended action) and `workitems-azure-devops.csv` and `workitems-jira.csv` (the open gaps as work items you can import into a tracker).
 - **Manual checks:** framework items that cannot be automated, so nothing is silently skipped.
 - **Since the last run:** new, resolved, improved and regressed findings when you pass a previous run as a baseline.
 - **Data collection health:** which API calls failed and why, so a gap in the data is never mistaken for a pass.
@@ -211,6 +212,7 @@ Optional components: `Az.Accounts` for `-AuthMethod Az`, and `Microsoft.PowerApp
 | `-SkipDataverse` | off | Skip every per-environment Dataverse check. |
 | `-SkipDeepScan` | off | Skip the agent topic, knowledge and trigger scan and the flow definition scan (the heaviest Dataverse reads). The agent access settings check still runs. |
 | `-SkipUsage` | off | Skip the usage and adoption analysis. |
+| `-SkipHandoff` | off | Skip `owner-outreach.csv`, `workitems-azure-devops.csv` and `workitems-jira.csv`. The suggested owner and effort columns in the report and in `findings.csv`, `findings.json` and `findings-register.csv` are still written. |
 | `-MaxDataverseEnvironments` | `10` | Environments scanned in Dataverse, default then production then sandbox first. A capped scan is labeled Sample. |
 | `-MaxEnvironmentSettingsCalls` | `200` | Environments whose management settings and Managed Environment settings are read. |
 | `-MaxAgentComponentsPerEnvironment` | `2000` | Agent components (topics, knowledge, triggers) read per environment. |
@@ -241,7 +243,7 @@ The script never changes anything in the tenant. Every call is a read; a few rea
 
 A redacted sample of the generated report is included so you can see what it looks like: [docs/sample-report/PowerPlatformCopilotStudioAudit.html](docs/sample-report/PowerPlatformCopilotStudioAudit.html). Download it and open it in a browser (GitHub shows HTML files as source, not rendered).
 
-The navigation bar jumps between Summary, Start here, Roadmap, Scorecard, Usage, Agents, Environments, All findings, Manual checks and Appendix. The findings list can be filtered by status, severity and area, searched, and expanded or collapsed. There is a light and a dark theme, and the page prints cleanly.
+The navigation bar jumps between Summary, Start here, Roadmap, Scorecard, Usage, Agents, Environments, All findings, Manual checks and Appendix. The findings list can be filtered by status, severity, suggested owner and area, searched, and expanded or collapsed. There is a light and a dark theme, and the page prints cleanly.
 
 ### Results
 
@@ -268,6 +270,28 @@ The navigation bar jumps between Summary, Start here, Roadmap, Scorecard, Usage,
 - **Fix these first** ranks every Fail and Warning (and Not verified items of High or Critical severity) by severity, then by Fail before Warning. Findings with the same root cause, such as orphaned assets, are shown once.
 - **Roadmap** places the same items: Critical goes to Contain, High to Standardize, Medium to Standardize (Fail) or Automate and measure (Warning), and Low to Automate and measure (Fail) or Optimize (Warning).
 - **Start here** rolls up the framework's 16 highest-value checks: admin roles and PIM; tenant data policy; default environment; Managed Environments and developer environments; unauthenticated agents; maker-provided credentials; sharing with Everyone; HTTP triggers and secrets; knowledge oversharing; write tools and autonomy; audit and detection; ownership and orphaned assets; transcripts; spend controls; most-used assets; unused assets.
+
+### Owner routing and hand-off
+
+Every finding names a **suggested owner** (the role best placed to fix it) and an **effort** level. Both come from a rules table in the script, so treat them as a starting point and adjust them for your organization.
+
+| Suggested owner | Typical items |
+|---|---|
+| Power Platform admin | Tenant settings, data policies, environment groups, Managed Environment settings, capacity and credit controls, reassigning orphaned assets. |
+| Entra / identity admin | Admin roles and PIM, Conditional Access, directory access for the owner lookup. |
+| Security and compliance | Auditing, transcript retention, customer-managed keys, external connectors, MCP and skills. |
+| Environment admin | Dataverse environment security settings, production roles, guest users, security groups, backups. |
+| Maker or asset owner | The app, flow or agent itself: authentication, sharing, secrets, stale or unused assets. |
+| Governance lead | Inventories, ownership and lifecycle process, usage reviews, privacy decisions. |
+
+Effort is **Quick win** (a setting), **Policy or process change**, or **Project**. The owner and effort show on each finding card, under Fix these first and in the roadmap, and the findings list has an Owner filter. They are the last columns of `findings.csv` and `findings.json` (`OwnerRole`, `Effort`) and of `findings-register.csv` (`Suggested owner`, `Effort`, next to the blank `Owner / date`).
+
+Three files hand the work over (skip them with `-SkipHandoff`):
+
+- **`owner-outreach.csv`** has one row per asset owner, so an admin can notify makers. Each row gives the owner, contact (sign-in name when the owner lookup resolved it), owner status (Active, Disabled, or Not checked when `-SkipEntra` or the lookup failed), highest risk, counts of agents, apps and flows, the environments, the reasons, the assets (type, name, environment and reasons, up to 25 per owner) and a recommended action. It lists agents rated Medium or higher in the agent risk register, apps and flows with a deleted or disabled owner, assets with no owner, apps and flows not modified for `-StaleDays`, and agents never published (over 90 days old) or not published for `-StaleDays` (dormant is judged from dates only). Assets whose owner is unknown or whose account was deleted go in one row labeled `No owner`, because there is nobody to notify. Owners of disabled accounts get their own row with a reassign step first.
+- **`workitems-azure-devops.csv`** and **`workitems-jira.csv`** have one work item per open (Fail or Warning) finding, in priority order, with the same roll-up as Fix these first. Description carries the finding value, recommended action, why, suggested owner, effort and Microsoft Learn links. Severity is mapped to Priority (Azure DevOps 1 to 4, Jira Highest, High, Medium, Low), and the severity text is also in Tags (Azure DevOps) or Labels (Jira) and in the Description. The work item type is `Task`, which exists in every Azure DevOps process and Jira project type; change it in the file if you prefer another type. There is no `Severity` column because that field exists only on some Azure DevOps work item types and an unknown column stops the import. The Jira file repeats the `Labels` header on purpose, which is how Jira reads several labels. Azure DevOps imports up to 1,000 work items per file.
+
+The hand-off files name people (display names and sign-in names), so store and share them like the rest of the output folder. Every cell is formula-safe, typographic punctuation in the work item text is converted to plain ASCII, and the Azure DevOps description is HTML-encoded.
 
 ### Governance KPIs
 
@@ -1142,9 +1166,11 @@ Each run writes a `PPCS-Review-<timestamp>` folder:
 | File | Contents |
 |---|---|
 | `report.html` | The report. Self-contained and works offline (Microsoft Learn links open in your browser). |
-| `findings.csv`, `findings.json` | Every finding with status, severity, confidence, value, detail, recommendation, why, Microsoft Learn links and evidence count. Use `findings.json` as the baseline for the next run. |
-| `findings-register.csv` | Open gaps in the framework findings-register layout, with Owner and date left blank for a remediation backlog. |
+| `findings.csv`, `findings.json` | Every finding with status, severity, confidence, value, detail, recommendation, why, Microsoft Learn links, suggested owner role, effort and evidence count. Use `findings.json` as the baseline for the next run. |
+| `findings-register.csv` | Open gaps in the framework findings-register layout, with Owner and date left blank for a remediation backlog, plus a suggested owner and effort. |
 | `agent-risk-register.csv`, `environment-profile.csv` | The full risk views behind the Agents and Environments sections. |
+| `owner-outreach.csv` | One row per asset owner with their at-risk assets (type, name, environment, reasons) and a recommended action, so an admin can notify makers. Assets with no usable owner are in one `No owner` row. Written when at least one asset needs attention; skipped with `-SkipHandoff`. |
+| `workitems-azure-devops.csv`, `workitems-jira.csv` | The open Fail and Warning findings as work items for CSV import into Azure DevOps (Work Item Type, Title, Description, Priority, Tags) or Jira (Summary, Issue Type, Priority, Description, Labels), with the value, recommendation, why, suggested owner, effort and Microsoft Learn links. Skipped with `-SkipHandoff`. |
 | `usage-*.csv`, `evidence\*.csv` | Full lists behind the usage tables and the evidence under each finding. |
 | `checklist-coverage.csv` | Every checklist item with its coverage: automated, attempted but unavailable, or manual. |
 | `run-summary.json`, `api-log.csv` | Scores, KPIs, limitations and parameters for the run, and the log of every API call (request IDs help when opening a support case). |
