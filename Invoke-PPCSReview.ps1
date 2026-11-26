@@ -3461,11 +3461,13 @@ a{color:var(--brand2)}
 .hero .conf{margin-top:12px;display:inline-block;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.28);border-radius:8px;padding:5px 11px;font-size:12px}
 .hero .conf.red{background:#fff3c4;border-color:#f5c542;color:#4a3500}
 nav.top{position:sticky;top:0;z-index:30;background:var(--card);border-bottom:1px solid var(--line);box-shadow:var(--shadow)}
-nav.top .wrap{display:flex;gap:2px;overflow-x:auto;padding-top:7px;padding-bottom:7px;align-items:center}
-nav.top a{white-space:nowrap;text-decoration:none;color:var(--muted);padding:6px 12px;border-radius:18px;font-weight:600;font-size:13px}
+nav.top .wrap{display:flex;gap:12px;padding-top:6px;padding-bottom:6px;align-items:center}
+nav.top .links{display:flex;flex:1 1 auto;flex-wrap:wrap;justify-content:center;gap:4px 2px;min-width:0}
+nav.top a{text-align:center;white-space:nowrap;text-decoration:none;color:var(--muted);padding:6px 9px;border-radius:18px;font-weight:600;font-size:13px}
 nav.top a:hover{background:var(--soft);color:var(--ink)}
 nav.top a.on{background:var(--brand);color:#fff}
-nav.top .sp{flex:1}
+nav.top .tools{display:flex;flex:none;gap:4px;padding-left:12px;border-left:1px solid var(--line)}
+nav.top .tool{margin:0;padding:6px 12px;font-size:13px;white-space:nowrap}
 main{padding:22px 0 60px}
 section.panel{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:22px 24px;margin:0 0 20px}
 section.panel>h2{margin:0 0 2px;font-size:20px}
@@ -3478,7 +3480,7 @@ h3{margin:22px 0 8px;font-size:15px}
 .g2{grid-template-columns:1fr 1fr}
 .g4{grid-template-columns:repeat(4,1fr)}
 @media (max-width:1100px){.g3,.g4{grid-template-columns:1fr 1fr}}
-@media (max-width:720px){.g2,.g3,.g4{grid-template-columns:1fr}.wrap{padding:0 14px}.verdict{gap:14px}.verdict .big{font-size:26px}}
+@media (max-width:720px){.g2,.g3,.g4{grid-template-columns:1fr}.wrap{padding:0 14px}.verdict{gap:14px}.verdict .big{font-size:26px}nav.top{position:static}nav.top .wrap{flex-direction:column;align-items:stretch;gap:6px}nav.top .tools{justify-content:center;padding-left:0;border-left:0}}
 .box{border:1px solid var(--line);border-radius:12px;padding:16px 18px;background:var(--card)}
 .box h3{margin:0 0 10px;font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
 .verdict{display:flex;gap:18px;align-items:center}
@@ -4739,7 +4741,7 @@ function Get-HtmlNav {
     [void]$items.Add(@('manual', 'Manual checks'))
     [void]$items.Add(@('appendix', 'Appendix'))
     $links = (@($items | ForEach-Object { "<a href='#$($_[0])'>$($_[1])</a>" })) -join ''
-    return "<nav class='top' aria-label='Report sections'><div class='wrap'>$links<span class='sp'></span><button type='button' class='tool' id='aboutBtn' aria-haspopup='dialog'><svg viewBox='0 0 24 24' width='14' height='14' aria-hidden='true' style='vertical-align:-2px;margin-right:5px'><circle cx='12' cy='12' r='9.5' fill='none' stroke='currentColor' stroke-width='2'/><path d='M12 11v6' stroke='currentColor' stroke-width='2' stroke-linecap='round'/><circle cx='12' cy='7.5' r='1.2' fill='currentColor'/></svg>About</button><button type='button' class='tool' id='printBtn'>Print</button></div></nav><dialog id='aboutDlg' class='about' aria-labelledby='aboutTitle'><div class='about-head'><h2 id='aboutTitle'>About this report</h2><button type='button' class='tool' id='aboutClose' aria-label='Close about'>Close</button></div>$(Get-HtmlAbout)</dialog>"
+    return "<nav class='top' aria-label='Report sections'><div class='wrap'><div class='links'>$links</div><div class='tools'><button type='button' class='tool' id='aboutBtn' aria-haspopup='dialog'><svg viewBox='0 0 24 24' width='14' height='14' aria-hidden='true' style='vertical-align:-2px;margin-right:5px'><circle cx='12' cy='12' r='9.5' fill='none' stroke='currentColor' stroke-width='2'/><path d='M12 11v6' stroke='currentColor' stroke-width='2' stroke-linecap='round'/><circle cx='12' cy='7.5' r='1.2' fill='currentColor'/></svg>About</button><button type='button' class='tool' id='printBtn'>Print</button></div></div></nav><dialog id='aboutDlg' class='about' aria-labelledby='aboutTitle'><div class='about-head'><h2 id='aboutTitle'>About this report</h2><button type='button' class='tool' id='aboutClose' aria-label='Close about'>Close</button></div>$(Get-HtmlAbout)</dialog>"
 }
 
 function Get-HtmlSummary {

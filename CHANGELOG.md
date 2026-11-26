@@ -32,6 +32,7 @@ All notable changes to `Invoke-PPCSReview.ps1`. Dates are release dates.
 
 ### Fixed
 
+- The report's navigation bar no longer shows a horizontal scrollbar. The section links wrap onto centered rows when they do not fit on one line (a run with a baseline, usage, agents and accepted risks needs about 1250 px), About and Print stay together at the right, and on narrow screens the bar is no longer sticky and the buttons sit centered below the links. The sample report in `docs/sample-report` has the same change.
 - `-BaselinePath` comparison now works on Windows PowerShell 5.1. That edition returns a JSON array as one object, so every finding was read as a single row and the "Since the last run" lists were wrong.
 - Findings 4.6 and 4.7 now treat a connector that is not listed in a policy as Blocked when the policy's default group is Blocked, instead of reporting it as not blocked.
 - Finding 4.6 no longer treats custom connector URL patterns as HTTP endpoint filtering. It reads HTTP endpoint filtering rules when the policy data includes them and reports Warning, not Fail, when it cannot see any.
