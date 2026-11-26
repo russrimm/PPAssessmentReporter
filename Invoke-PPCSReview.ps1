@@ -3449,7 +3449,7 @@ function Get-ReportCss {
 --fail:#ff9a90;--fail-bg:#3d1714;--warn:#ffbc66;--warn-bg:#3a2a10;--pass:#6fdca0;--pass-bg:#10301f;--info:#5fd3de;--info-bg:#0e3238;--na:#b3bccb;--na-bg:#262b36;--man:#c9aef5;--man-bg:#2a2147;--acc:#b4c0ff;--acc-bg:#1f2547;
 --high:#ffbc66;--med:#b3bccb;--low:#9aa3b2;--shadow:none}}
 *{box-sizing:border-box}
-html{scroll-behavior:smooth;scroll-padding-top:64px}
+html{scroll-behavior:smooth;scroll-padding-top:76px}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 "Segoe UI",system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif}
 a{color:var(--brand2)}
 .wrap{max-width:1360px;margin:0 auto;padding:0 28px}
@@ -3462,9 +3462,15 @@ a{color:var(--brand2)}
 .hero .conf.red{background:#fff3c4;border-color:#f5c542;color:#4a3500}
 nav.top{position:sticky;top:0;z-index:30;background:var(--card);border-bottom:1px solid var(--line);box-shadow:var(--shadow)}
 nav.top .wrap{display:flex;gap:12px;padding-top:6px;padding-bottom:6px;align-items:center}
-nav.top .links{display:flex;flex:1 1 auto;flex-wrap:wrap;justify-content:center;gap:4px 2px;min-width:0}
-nav.top a{text-align:center;white-space:nowrap;text-decoration:none;color:var(--muted);padding:6px 9px;border-radius:18px;font-weight:600;font-size:13px}
-nav.top a:hover{background:var(--soft);color:var(--ink)}
+nav.top ul{list-style:none;margin:0;padding:0}
+nav.top .groups{display:flex;flex:1 1 auto;flex-wrap:wrap;justify-content:center;gap:6px;min-width:0}
+nav.top .grp{display:flex;flex-direction:column;gap:1px;min-width:0;max-width:100%;padding:2px 3px 3px;border-radius:16px;background:var(--soft)}
+nav.top .glabel{padding:0 8px;font-size:10px;font-weight:700;line-height:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+nav.top .grp.cur .glabel{color:var(--brand)}
+nav.top .grp ul{display:flex;flex-wrap:wrap;gap:1px}
+nav.top a{display:block;text-align:center;white-space:nowrap;text-decoration:none;color:var(--muted);padding:4px 8px;border-radius:16px;font-weight:600;font-size:13px}
+nav.top a:hover{background:var(--card);color:var(--ink)}
+nav.top a:focus-visible,nav.top .tool:focus-visible{outline:2px solid var(--brand2);outline-offset:1px}
 nav.top a.on{background:var(--brand);color:#fff}
 nav.top .tools{display:flex;flex:none;gap:4px;padding-left:12px;border-left:1px solid var(--line)}
 nav.top .tool{margin:0;padding:6px 12px;font-size:13px;white-space:nowrap}
@@ -3480,7 +3486,9 @@ h3{margin:22px 0 8px;font-size:15px}
 .g2{grid-template-columns:1fr 1fr}
 .g4{grid-template-columns:repeat(4,1fr)}
 @media (max-width:1100px){.g3,.g4{grid-template-columns:1fr 1fr}}
-@media (max-width:720px){.g2,.g3,.g4{grid-template-columns:1fr}.wrap{padding:0 14px}.verdict{gap:14px}.verdict .big{font-size:26px}nav.top{position:static}nav.top .wrap{flex-direction:column;align-items:stretch;gap:6px}nav.top .tools{justify-content:center;padding-left:0;border-left:0}}
+@media (max-width:720px){.g2,.g3,.g4{grid-template-columns:1fr}.wrap{padding:0 14px}.verdict{gap:14px}.verdict .big{font-size:26px}}
+@media (max-width:800px){nav.top{position:static}nav.top .wrap{flex-direction:column;align-items:stretch;gap:6px}nav.top .tools{justify-content:center;padding-left:0;border-left:0}}
+@media (max-width:560px){nav.top .groups{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:5px}nav.top .grp{border-radius:14px}}
 .box{border:1px solid var(--line);border-radius:12px;padding:16px 18px;background:var(--card)}
 .box h3{margin:0 0 10px;font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
 .verdict{display:flex;gap:18px;align-items:center}
@@ -3632,10 +3640,14 @@ function Get-ReportJs {
 'use strict';
 var $=function(s,r){return (r||document).querySelector(s)};
 var $$=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))};
-var links=$$('nav.top a[href^="#"]');
+var nav=$('nav.top'),links=$$('nav.top a[href^="#"]'),grps=$$('nav.top .grp');
 var secs=links.map(function(a){return document.getElementById(a.getAttribute('href').slice(1))}).filter(Boolean);
-function onScroll(){var y=window.scrollY+110,cur=secs[0];secs.forEach(function(s){if(s.offsetTop<=y)cur=s});links.forEach(function(a){a.classList.toggle('on',!!cur&&a.getAttribute('href')==='#'+cur.id)})}
-window.addEventListener('scroll',onScroll,{passive:true});onScroll();
+function navH(){return nav&&getComputedStyle(nav).position==='sticky'?nav.offsetHeight:0}
+function onScroll(){var y=window.scrollY+navH()+40,cur=secs[0];secs.forEach(function(s){if(s.offsetTop<=y)cur=s});
+links.forEach(function(a){var on=!!cur&&a.getAttribute('href')==='#'+cur.id;a.classList.toggle('on',on);if(on)a.setAttribute('aria-current','location');else a.removeAttribute('aria-current')});
+grps.forEach(function(g){g.classList.toggle('cur',!!$('a.on',g))})}
+function fit(){document.documentElement.style.scrollPaddingTop=(navH()+12)+'px';onScroll()}
+window.addEventListener('scroll',onScroll,{passive:true});window.addEventListener('resize',fit);fit();
 function applyLimit(t){var lim=parseInt(t.getAttribute('data-limit')||'0',10);if(!lim)return;var open=t.classList.contains('open');$$('tr',t.tBodies[0]).forEach(function(r,i){r.classList.toggle('xrow',!open&&i>=lim)})}
 function sortTable(t,i,th){var tb=t.tBodies[0],rows=$$('tr',tb),dir=th.getAttribute('aria-sort')==='ascending'?'descending':'ascending';
 $$('th',t).forEach(function(x){x.removeAttribute('aria-sort')});th.setAttribute('aria-sort',dir);
@@ -3656,7 +3668,7 @@ var ex=$('#expandAll');if(ex)ex.addEventListener('click',function(){$$('details.
 var co=$('#collapseAll');if(co)co.addEventListener('click',function(){$$('details.area').forEach(function(d){d.open=false})});
 var rs=$('#resetFilters');if(rs)rs.addEventListener('click',function(){state={status:'all',sev:'all',area:'all',owner:'all',q:''};if(q)q.value='';if(af)af.value='all';$$('.chipbtn[data-k]').forEach(function(x){x.classList.toggle('on',x.getAttribute('data-v')==='all')});applyFilters()});
 $$('a.perma').forEach(function(a){a.addEventListener('click',function(e){var url=location.href.split('#')[0]+a.getAttribute('href');if(navigator.clipboard&&navigator.clipboard.writeText){e.preventDefault();navigator.clipboard.writeText(url).then(function(){a.textContent='\u2713';setTimeout(function(){a.textContent='#'},1200)},function(){})}})});
-function openTarget(){var h=location.hash.slice(1);if(!h)return;var el=document.getElementById(h);if(!el)return;var d=el.closest('details');while(d){d.open=true;d=d.parentElement?d.parentElement.closest('details'):null}
+function openTarget(){var h=location.hash.slice(1);if(!h)return;var el=document.getElementById(h);if(!el||el.matches('section.panel'))return;var d=el.closest('details');while(d){d.open=true;d=d.parentElement?d.parentElement.closest('details'):null}
 if(el.hidden){el.hidden=false}el.scrollIntoView({block:'center'});if(el.classList.contains('finding')){el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash')}}
 window.addEventListener('hashchange',openTarget);openTarget();
 var was=[];window.addEventListener('beforeprint',function(){was=$$('details').map(function(d){return d.open});$$('details').forEach(function(d){d.open=true});$$('table[data-limit]').forEach(function(t){t.classList.add('open');applyLimit(t)})});
@@ -4627,10 +4639,10 @@ function Write-Report {
     [void]$sb.Append("<main class='wrap'>")
     [void]$sb.Append((Get-HtmlSummary $m))
     if ($diff) { [void]$sb.Append((Get-HtmlChanges $m)) }
+    [void]$sb.Append((Get-HtmlScorecard $m))
     [void]$sb.Append((Get-HtmlStartHere $m))
     [void]$sb.Append((Get-HtmlRoadmap $m))
     if ($script:ExceptionsLoaded) { [void]$sb.Append((Get-HtmlAcceptedRisk)) }
-    [void]$sb.Append((Get-HtmlScorecard $m))
     [void]$sb.Append((Get-HtmlUsage))
     [void]$sb.Append((Get-HtmlAgents $m))
     [void]$sb.Append((Get-HtmlEnvironments $m))
@@ -4727,21 +4739,36 @@ function Get-HtmlAbout {
 
 function Get-HtmlNav {
     param($M)
-    $items = New-Object System.Collections.ArrayList
-    [void]$items.Add(@('summary', 'Summary'))
-    if ($M.Diff) { [void]$items.Add(@('changes', 'Since last run')) }
-    [void]$items.Add(@('starthere', 'Start here'))
-    [void]$items.Add(@('roadmap', 'Roadmap'))
-    if ($script:ExceptionsLoaded) { [void]$items.Add(@('accepted', 'Accepted risks')) }
-    [void]$items.Add(@('scorecard', 'Scorecard'))
-    if ($script:Usage.Count -gt 0) { [void]$items.Add(@('usage', 'Usage')) }
-    if (@($M.AgentRisk).Count -gt 0) { [void]$items.Add(@('agents', 'Agents')) }
-    if (@($M.EnvProfile).Count -gt 0) { [void]$items.Add(@('environments', 'Environments')) }
-    [void]$items.Add(@('findings', 'All findings'))
-    [void]$items.Add(@('manual', 'Manual checks'))
-    [void]$items.Add(@('appendix', 'Appendix'))
-    $links = (@($items | ForEach-Object { "<a href='#$($_[0])'>$($_[1])</a>" })) -join ''
-    return "<nav class='top' aria-label='Report sections'><div class='wrap'><div class='links'>$links</div><div class='tools'><button type='button' class='tool' id='aboutBtn' aria-haspopup='dialog'><svg viewBox='0 0 24 24' width='14' height='14' aria-hidden='true' style='vertical-align:-2px;margin-right:5px'><circle cx='12' cy='12' r='9.5' fill='none' stroke='currentColor' stroke-width='2'/><path d='M12 11v6' stroke='currentColor' stroke-width='2' stroke-linecap='round'/><circle cx='12' cy='7.5' r='1.2' fill='currentColor'/></svg>About</button><button type='button' class='tool' id='printBtn'>Print</button></div></div></nav><dialog id='aboutDlg' class='about' aria-labelledby='aboutTitle'><div class='about-head'><h2 id='aboutTitle'>About this report</h2><button type='button' class='tool' id='aboutClose' aria-label='Close about'>Close</button></div>$(Get-HtmlAbout)</dialog>"
+    # One list in reading order: understand the result, decide what to do, investigate the detail, then reference.
+    # The order matches the page order set in Write-Report. A group with no visible link is not drawn.
+    $groups = @(
+        @{ Label = 'Results'; Items = @(
+                @{ Id = 'summary'; Text = 'Summary'; Show = $true }
+                @{ Id = 'changes'; Text = 'Since last run'; Show = [bool]$M.Diff }
+                @{ Id = 'scorecard'; Text = 'Scorecard'; Show = $true }) }
+        @{ Label = 'Priorities'; Items = @(
+                @{ Id = 'starthere'; Text = 'Start here'; Show = $true }
+                @{ Id = 'roadmap'; Text = 'Roadmap'; Show = $true }
+                @{ Id = 'accepted'; Text = 'Accepted risks'; Show = [bool]$script:ExceptionsLoaded }) }
+        @{ Label = 'Detail'; Items = @(
+                @{ Id = 'usage'; Text = 'Usage'; Show = ($script:Usage.Count -gt 0) }
+                @{ Id = 'agents'; Text = 'Agents'; Show = (@($M.AgentRisk).Count -gt 0) }
+                @{ Id = 'environments'; Text = 'Environments'; Show = (@($M.EnvProfile).Count -gt 0) }
+                @{ Id = 'findings'; Text = 'All findings'; Show = $true }
+                @{ Id = 'manual'; Text = 'Manual checks'; Show = $true }) }
+        @{ Label = 'Reference'; Items = @(
+                @{ Id = 'appendix'; Text = 'Appendix'; Show = $true }) }
+    )
+    $sbNav = New-Object System.Text.StringBuilder
+    foreach ($g in $groups) {
+        $shown = @($g.Items | Where-Object { $_.Show })
+        if ($shown.Count -eq 0) { continue }
+        $gid = 'navg-' + $g.Label.ToLowerInvariant()
+        $lis = (@($shown | ForEach-Object { "<li><a href='#$($_.Id)'>$($_.Text)</a></li>" })) -join ''
+        [void]$sbNav.Append("<li class='grp'><span class='glabel' id='$gid'>$($g.Label)</span><ul role='list' aria-labelledby='$gid'>$lis</ul></li>")
+    }
+    $links = $sbNav.ToString()
+    return "<nav class='top' aria-label='Report sections'><div class='wrap'><ul class='groups' role='list'>$links</ul><div class='tools'><button type='button' class='tool' id='aboutBtn' aria-haspopup='dialog'><svg viewBox='0 0 24 24' width='14' height='14' aria-hidden='true' style='vertical-align:-2px;margin-right:5px'><circle cx='12' cy='12' r='9.5' fill='none' stroke='currentColor' stroke-width='2'/><path d='M12 11v6' stroke='currentColor' stroke-width='2' stroke-linecap='round'/><circle cx='12' cy='7.5' r='1.2' fill='currentColor'/></svg>About</button><button type='button' class='tool' id='printBtn'>Print</button></div></div></nav><dialog id='aboutDlg' class='about' aria-labelledby='aboutTitle'><div class='about-head'><h2 id='aboutTitle'>About this report</h2><button type='button' class='tool' id='aboutClose' aria-label='Close about'>Close</button></div>$(Get-HtmlAbout)</dialog>"
 }
 
 function Get-HtmlSummary {
