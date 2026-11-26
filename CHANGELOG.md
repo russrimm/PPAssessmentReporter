@@ -24,6 +24,7 @@ All notable changes to `Invoke-PPCSReview.ps1`. Dates are release dates.
 
 ### Changed
 
+- **Report navigation is one grouped list.** The flat run of section pills is now a single navigation bar in reading order, split into four labeled groups: **Results** (Summary, Since last run, Scorecard), **Priorities** (Start here, Roadmap, Accepted risks), **Detail** (Usage, Agents, Environments, All findings, Manual checks) and **Reference** (Appendix). The Scorecard section moved up to follow Summary and Since last run so the page reads in the same order as the bar; every section id is unchanged, so existing links and bookmarks still work. Sections a run does not have (Since last run, Accepted risks, Usage, Agents, Environments) drop out of their group, and a group is never drawn empty. The bar highlights the section and the group you are reading and marks the current link with `aria-current`, links to a section land below the pinned bar, and at 800 px wide or less the bar is no longer pinned to the top (the groups stack at 560 px or less). The sample report in `docs/sample-report` has the same change.
 - Roadmap status pills are now aligned in a fixed-width column on the right of each item, so they line up in every column of the 30/60/90-day roadmap.
 - **Optional features stay optional.** Finding 3.1 no longer fails an unmanaged default environment: it is Info with a "Recommended" action, and a Warning only when the default environment holds more assets than `-DefaultEnvironmentAssetWarnThreshold`. Environment routing (3.6) and the weekly admin digest (14.3) are Info when off, because both need Managed Environments.
 - Finding 3.8 no longer counts developer environments, which Microsoft's security group guidance does not cover.
@@ -32,7 +33,7 @@ All notable changes to `Invoke-PPCSReview.ps1`. Dates are release dates.
 
 ### Fixed
 
-- The report's navigation bar no longer shows a horizontal scrollbar. The section links wrap onto centered rows when they do not fit on one line (a run with a baseline, usage, agents and accepted risks needs about 1250 px), About and Print stay together at the right, and on narrow screens the bar is no longer sticky and the buttons sit centered below the links. The sample report in `docs/sample-report` has the same change.
+- The report's navigation bar no longer shows a horizontal scrollbar. The section groups wrap onto more rows when they do not fit on one line, About and Print stay together at the right, and on narrow screens the bar is no longer sticky and the buttons sit centered below the groups. The sample report in `docs/sample-report` has the same change.
 - `-BaselinePath` comparison now works on Windows PowerShell 5.1. That edition returns a JSON array as one object, so every finding was read as a single row and the "Since the last run" lists were wrong.
 - Findings 4.6 and 4.7 now treat a connector that is not listed in a policy as Blocked when the policy's default group is Blocked, instead of reporting it as not blocked.
 - Finding 4.6 no longer treats custom connector URL patterns as HTTP endpoint filtering. It reads HTTP endpoint filtering rules when the policy data includes them and reports Warning, not Fail, when it cannot see any.

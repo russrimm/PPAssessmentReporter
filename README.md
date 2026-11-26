@@ -261,7 +261,7 @@ The script never changes anything in the tenant. Every call is a read; a few rea
 
 A redacted sample of the generated report is included so you can see what it looks like: [docs/sample-report/PowerPlatformCopilotStudioAudit.html](docs/sample-report/PowerPlatformCopilotStudioAudit.html). Download it and open it in a browser (GitHub shows HTML files as source, not rendered).
 
-The navigation bar jumps between Summary, Start here, Roadmap, Scorecard, Usage, Agents, Environments, All findings, Manual checks and Appendix. The findings list can be filtered by status, severity, suggested owner and area, searched, and expanded or collapsed. There is a light and a dark theme, and the page prints cleanly.
+The navigation bar is one list of every section in reading order, in four labeled groups: **Results** (Summary, Since last run, Scorecard), **Priorities** (Start here, Roadmap, Accepted risks), **Detail** (Usage, Agents, Environments, All findings, Manual checks) and **Reference** (Appendix). Since last run and Accepted risks appear only when you pass `-BaselinePath` or `-ExceptionsPath`, Usage, Agents and Environments only when the run found data for them, and a group never shows without at least one link. The page sections follow the same order, and the bar highlights the section and group you are reading. On a window 800 px wide or less the bar is no longer pinned to the top, and at 560 px or less the groups stack. The findings list can be filtered by status, severity, suggested owner and area, searched, and expanded or collapsed. There is a light and a dark theme, and the page prints cleanly.
 
 ### Results
 
